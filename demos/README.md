@@ -1,0 +1,68 @@
+# Demos
+
+Each demo maps to questions prospects actually asked, catalogued in
+[`../plans/databricks-integration.md`](../plans/databricks-integration.md). Numbering follows the
+roadmap in that document, so gaps are features that are not built yet rather than missing files.
+
+| Demo | Answers | Needs a Databricks account |
+| --- | --- | --- |
+| [`01_hello_spark`](01_hello_spark) | "is it real Spark", "how do I get started" | no, runs locally too |
+| [`02_unity_catalog`](02_unity_catalog) | governance, reproducibility over governed data | yes |
+| [`03_no_cluster`](03_no_cluster) | reading governed data without paying for a cluster | yes |
+| [`04_existing_jobs`](04_existing_jobs) | "do I have to rewrite my pipelines" | yes |
+| [`06_cost_attribution`](06_cost_attribution) | "why did this month cost more" | yes, plus system tables |
+
+Not built yet, in roadmap order: `05_debugging_and_observability` needs the Spark card,
+`07_mlflow_together` needs the MLflow bridge, `08_from_a_notebook` needs both,
+`09_production_project` needs `export-bundle`, `10_end_to_end_reference` composes all of them, and
+`11_environments` needs `@pypi` parity on the Spark side. [`../plans/scope.md`](../plans/scope.md)
+lays out the capability each of those depends on.
+
+Each demo directory has its own README with the narrative and the exact commands. Run them from
+inside their directory, since the flows import job modules sitting next to them.
+
+## Setup
+
+```bash
+pip install -e '..[databricks,catalog]'
+export DATABRICKS_HOST=https://<workspace>.cloud.databricks.com
+export DATABRICKS_TOKEN=dapi...
+```
+
+Any authentication the Databricks SDK understands works, including `~/.databrickscfg` profiles and
+OAuth service principals, because the extension delegates the whole resolution chain to the SDK:
+
+```bash
+export DATABRICKS_CONFIG_PROFILE=my-workspace
+```
+
+Demo 1 needs none of this. Run it first.
+
+Demo 6's zero-DBU branch reads `samples.bakehouse.sales_transactions`, which every workspace ships
+with, so no seed data is needed there. Demos 2 and 3 both read `main.retail.orders`, and demo 2
+mutates it, so both need a table you own; seed one from the same sample data using the
+`CREATE TABLE` in [`02_unity_catalog/README.md`](02_unity_catalog/README.md#seed-data). Demos that
+submit jobs also need a UC Volume to stage code on:
+
+```bash
+export METAFLOW_DATABRICKS_VOLUME=/Volumes/main/metaflow/staging
+```
+
+Demo 3's SQL warehouse branch needs a warehouse id, via `--warehouse-id` on the flow or:
+
+```bash
+export DATABRICKS_WAREHOUSE_ID=<warehouse-id>
+```
+
+## Which demo answers which objection
+
+**"We already have Databricks, why add anything."** Demo 4 first, then 6. Metaflow orchestrates what
+exists without touching it, and then tells them where their money went, which their platform cannot.
+
+**"Does this respect our governance."** Demo 2. Every read goes through Unity Catalog, and Metaflow
+adds version pinning on top rather than copying data out.
+
+**"Spark is expensive for what we do."** Demo 3. Same table, same grants, no cluster: a Spark session,
+credential vending, and a SQL warehouse statement side by side, so the trade-off is a measurement.
+
+**"Is this actually Spark."** Demo 1, in the three-backend form, live.

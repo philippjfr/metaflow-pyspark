@@ -1,0 +1,75 @@
+"""Demo 2c: the pin is what makes a re-run a re-run.
+
+    python governed_read.py run          # run 1, pins the table at vN
+    python mutate_orders.py run          # table moves to vN+1
+    python reproduce.py run              # reads vN anyway, and shows the difference
+
+By default this picks up the latest successful `GovernedReadFlow`; pass
+`--origin-run <run_id>` to replay a specific one.
+"""
+
+from metaflow import Flow, FlowSpec, Parameter, Run, spark, step
+
+
+class ReproduceFlow(FlowSpec):
+    origin_run = Parameter("origin-run", default=None, type=str)
+
+    @step
+    def start(self):
+        origin = (
+            Run("GovernedReadFlow/%s" % self.origin_run)
+            if self.origin_run
+            else Flow("GovernedReadFlow").latest_successful_run
+        )
+        print("replaying %s" % origin.pathspec)
+
+        # The artifact carries the pin, so nothing here has to know which version to ask
+        # for. That is the whole point: reproducibility is a property of the run, not of
+        # a number someone remembered to write down.
+        self.orders = origin["start"].task.data.orders
+        print("as seen by that run: %r" % self.orders)
+        self.next(self.compare)
+
+    @spark(backend="databricks")
+    @step
+    def compare(self):
+        pinned = self.orders.to_spark(self.spark)
+        latest = self.orders.latest()
+
+        self.pinned_version = self.orders.version
+        self.latest_version = latest.version
+        self.pinned_rows = pinned.count()
+        self.latest_rows = latest.to_spark(self.spark).count()
+        self.next(self.end)
+
+    @step
+    def end(self):
+        def fmt(version):
+            return "v%s" % version if version is not None else "unpinned"
+
+        print(
+            "pinned %s: %d rows\nlatest %s: %d rows"
+            % (
+                fmt(self.pinned_version),
+                self.pinned_rows,
+                fmt(self.latest_version),
+                self.latest_rows,
+            )
+        )
+        if self.pinned_version is None:
+            print(
+                "\nThe pin did not take at assignment time (see the warning on the "
+                "`start` step of the original run). Reads still work through "
+                "to_spark(), just not pinned to a version."
+            )
+        elif self.pinned_rows == self.latest_rows:
+            print("\nSame counts, so run mutate_orders.py and try again.")
+        else:
+            print(
+                "\nThe table moved and the earlier run did not. Time travel is doing "
+                "the work; Metaflow only has to remember the version."
+            )
+
+
+if __name__ == "__main__":
+    ReproduceFlow()

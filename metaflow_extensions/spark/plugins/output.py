@@ -1,0 +1,169 @@
+"""Turning a Spark result into a Metaflow artifact.
+
+The default is deliberately *not* "collect everything into pandas". At Spark scale that
+is the wrong default, so ``output_format="table"`` and ``"url"`` let a step pass a
+reference to the next step instead of the data.
+"""
+
+from .exceptions import SparkConfigError, SparkException
+
+#: Formats that materialize data into the task process.
+MATERIALIZING = ("pandas", "arrow", "polars")
+
+FORMATS = MATERIALIZING + ("url", "table", "spark", "none")
+
+
+def validate_format(output_format):
+    if output_format not in FORMATS:
+        raise SparkConfigError(
+            "Unknown @spark(output_format=%r). Choose one of: %s."
+            % (output_format, ", ".join(FORMATS))
+        )
+    return output_format
+
+
+def _require(module, output_format):
+    try:
+        return __import__(module)
+    except ImportError:
+        raise SparkException(
+            "output_format=%r requires '%s'. Install it, or add it to the step with "
+            "@pypi(packages={'%s': ''})." % (output_format, module, module)
+        )
+
+
+def from_spark_dataframe(df, output_format):
+    """Materialize a live Spark DataFrame according to `output_format`."""
+    validate_format(output_format)
+    if df is None or output_format == "none":
+        return None
+    if output_format == "spark":
+        # Not picklable. The decorator refuses to persist this; it is only useful for
+        # handing a live DataFrame to code inside the same step.
+        return df
+    if output_format == "pandas":
+        _require("pandas", output_format)
+        return df.toPandas()
+    if output_format == "arrow":
+        _require("pyarrow", output_format)
+        return _spark_to_arrow(df)
+    if output_format == "polars":
+        polars = _require("polars", output_format)
+        return polars.from_arrow(_spark_to_arrow(df))
+    raise SparkConfigError(
+        "output_format=%r needs a job that writes to storage; a session backend "
+        "returns a live DataFrame instead." % output_format
+    )
+
+
+def _spark_to_arrow(df):
+    """Collect a Spark DataFrame as an Arrow table without going through pandas."""
+    # Spark Connect and classic Spark both expose the private Arrow collector, and it
+    # avoids a pandas round trip that would otherwise mangle types.
+    for attr in ("_collect_as_arrow", "toArrow"):
+        collect = getattr(df, attr, None)
+        if collect is None:
+            continue
+        result = collect()
+        if hasattr(result, "num_rows"):
+            return result
+        import pyarrow as pa
+
+        return pa.Table.from_batches(result)
+    import pyarrow as pa
+
+    return pa.Table.from_pandas(df.toPandas(), preserve_index=False)
+
+
+def from_storage(url, output_format, filesystem=None):
+    """Materialize a remote job's Parquet output according to `output_format`."""
+    validate_format(output_format)
+    if output_format in ("none", "spark"):
+        return None
+    if output_format in ("url", "table"):
+        return url
+    if url is None:
+        return None
+
+    table = read_parquet(url, filesystem=filesystem)
+    if output_format == "arrow":
+        return table
+    if output_format == "pandas":
+        _require("pandas", output_format)
+        return table.to_pandas()
+    if output_format == "polars":
+        polars = _require("polars", output_format)
+        return polars.from_arrow(table)
+    return table
+
+
+def from_arrow_table(table, output_format):
+    """Convert an already-collected Arrow table to `pandas`, `arrow`, or `polars`.
+
+    Shared by every backend that ends up with an Arrow table in hand: the Jobs
+    backend's Parquet output and the SQL warehouse backend's Arrow-stream result both
+    go through this rather than duplicating the pandas/polars conversion.
+    """
+    if output_format == "arrow":
+        return table
+    if output_format == "pandas":
+        _require("pandas", output_format)
+        return table.to_pandas()
+    if output_format == "polars":
+        polars = _require("polars", output_format)
+        return polars.from_arrow(table)
+    return table
+
+
+def read_parquet(url, filesystem=None, storage_options=None):
+    """Read a Parquet dataset from any supported storage URL as an Arrow table.
+
+    Resolution order is pyarrow's own filesystem handling first, then fsspec, then
+    Metaflow's S3 client. The last is a genuinely useful fallback rather than
+    redundancy: it picks up Metaflow's role assumption and retry behaviour on S3.
+    """
+    import pyarrow.dataset as ds
+
+    if filesystem is not None:
+        return ds.dataset(url, filesystem=filesystem, format="parquet").to_table()
+
+    try:
+        import pyarrow.fs as pafs
+
+        fs, path = pafs.FileSystem.from_uri(url)
+        return ds.dataset(path, filesystem=fs, format="parquet").to_table()
+    except Exception as pa_exc:
+        try:
+            import fsspec
+
+            fs = fsspec.filesystem(
+                url.split("://")[0] if "://" in url else "file",
+                **(storage_options or {}),
+            )
+            return ds.dataset(url, filesystem=fs, format="parquet").to_table()
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        if url.startswith("s3://"):
+            return _read_parquet_via_metaflow_s3(url)
+        raise SparkException(
+            "Could not read the Spark output at %s: %s" % (url, pa_exc)
+        ) from pa_exc
+
+
+def _read_parquet_via_metaflow_s3(url):
+    from metaflow import S3
+    from pyarrow.parquet import ParquetDataset
+
+    from .context import log
+
+    with S3() as s3:
+        files = s3.get_recursive([url])
+        parqs = [f for f in files if f.url.endswith(".parquet")]
+        if not parqs:
+            raise SparkException("No Parquet files found under %s." % url)
+        total = sum(p.size for p in parqs)
+        log("downloaded %.1fMB of compressed output" % (total / 1024**2))
+        return ParquetDataset([p.path for p in parqs]).read()

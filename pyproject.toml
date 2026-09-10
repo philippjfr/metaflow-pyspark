@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metaflow-spark"
+version = "0.1.0"
+description = "Spark and Databricks decorators for Metaflow"
+authors = [{ name = "Ville Tuulos", email = "ville@outerbounds.co" }]
+requires-python = ">=3.9"
+dependencies = ["metaflow"]
+
+[project.optional-dependencies]
+# Databricks Connect brings its own pyspark; installing both breaks the import.
+databricks = ["databricks-sdk>=0.86", "databricks-connect>=15.4"]
+catalog = ["deltalake>=0.18", "pyarrow"]
+local = ["pyspark>=3.5"]
+emr = ["boto3"]
+
+[tool.setuptools]
+py-modules = ["metaflow_extensions"]
+
+[tool.setuptools.packages.find]
+include = ["metaflow_extensions.*"]
