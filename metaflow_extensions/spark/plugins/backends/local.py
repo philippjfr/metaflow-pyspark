@@ -5,12 +5,29 @@ the whole @spark code path with no credentials, which is what makes the rest of 
 backends safe to refactor.
 """
 
+import os
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 
 from . import SESSION, SparkBackend
 from ..exceptions import SparkBackendUnavailable
+
+
+def _ensure_java_home(prefix=None):
+    """Point JAVA_HOME at a JDK installed into the running Python's environment.
+
+    conda's openjdk sets JAVA_HOME from an activation script, which a baked image that
+    runs the environment's python directly never sources.
+    """
+    if os.environ.get("JAVA_HOME") or shutil.which("java"):
+        return
+    prefix = prefix or sys.prefix
+    for home in (os.path.join(prefix, "lib", "jvm"), prefix):
+        if os.path.exists(os.path.join(home, "bin", "java")):
+            os.environ["JAVA_HOME"] = home
+            return
 
 
 class LocalSparkBackend(SparkBackend):
@@ -24,6 +41,7 @@ class LocalSparkBackend(SparkBackend):
         except ImportError:
             raise SparkBackendUnavailable("local", "pyspark", extra="local")
 
+        _ensure_java_home()
         config = self.config
         master = config.get("master", "local[*]")
         params = dict(config.get("spark-parameters") or {})

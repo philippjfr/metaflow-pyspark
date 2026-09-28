@@ -391,6 +391,42 @@ def test_deletion_vectors_explanation_says_when_duckdb_was_tried_and_failed(tmp_
     assert "DuckDB's own reader also failed" in str(exc.value)
 
 
+def test_azure_fallback_uses_the_curl_transport(monkeypatch):
+    """Without it, DuckDB's Azure reader fails on images lacking the SDK's CA path."""
+    import sys
+    import types
+
+    statements = []
+
+    class Connection:
+        def install_extension(self, name):
+            pass
+
+        load_extension = install_extension
+
+        def execute(self, sql, params=None):
+            statements.append(sql)
+
+        def sql(self, sql, params=None):
+            raise RuntimeError("stop before reading")
+
+        def close(self):
+            pass
+
+    fake_duckdb = types.SimpleNamespace(connect=Connection)
+    monkeypatch.setitem(sys.modules, "duckdb", fake_duckdb)
+    info = dict(
+        TABLE_INFO,
+        storage_location="abfss://data@acct.dfs.core.windows.net/retail/orders",
+    )
+    sas = {"azure_user_delegation_sas": {"sas_token": "sv=2024"}}
+    ref = table(client=FakeClient(info=info, credentials=sas))
+
+    with pytest.raises(UnityCatalogError, match="stop before reading"):
+        ref._read_via_duckdb(ValueError("deletionVectors"))
+    assert statements[0] == "SET azure_transport_option_type = 'curl'"
+
+
 # ----------------------------------------------------------------------
 # the Azure SAS fallback: verified as far as this suite can verify anything
 # without a real Azure storage account (see _read_via_duckdb's docstring)

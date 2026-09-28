@@ -54,6 +54,30 @@ Demo 3's SQL warehouse branch needs a warehouse id, via `--warehouse-id` on the 
 export DATABRICKS_WAREHOUSE_ID=<warehouse-id>
 ```
 
+## Running on Outerbounds
+
+Install the extension next to `outerbounds` on the machine you launch from; Metaflow ships it to
+the task pods in the code package. Then pick a virtual environment and send the steps to
+Kubernetes:
+
+```bash
+python hello_spark.py --environment=fast-bakery run --with kubernetes
+python hello_spark.py --environment=fast-bakery argo-workflows create
+```
+
+Every step carries a `@step_env(...)` from [`_env.py`](_env.py), which does nothing under the
+default local environment and, under `fast-bakery`, gives the step:
+
+- `@anaconda` from Anaconda's main channel, or `@pypi` for steps that need `databricks-connect`
+  (PyPI only) or `deltalake` (conda-forge only, and incompatible with Anaconda's Python);
+- `@secrets(sources=["outerbounds.databricks"])` for `DATABRICKS_HOST` and `DATABRICKS_TOKEN`;
+- `@environment` carrying the settings above (`METAFLOW_DATABRICKS_VOLUME`,
+  `DATABRICKS_WAREHOUSE_ID`, `METAFLOW_SPARK_BACKEND`, and the rest of `FORWARDED_SETTINGS`) from
+  the launching shell into the pods. For a deployment they are captured at `create` time.
+
+The pods need outbound HTTPS to the Databricks workspace and, for credential vending, to the
+table's cloud storage.
+
 ## Which demo answers which objection
 
 **"We already have Databricks, why add anything."** Demo 4 first, then 6. Metaflow orchestrates what

@@ -35,6 +35,8 @@ builtdocs/
 .vscode/
 .idea/
 *.swp
+.#*
+\#*#
 
 # Local secrets / env files
 .env

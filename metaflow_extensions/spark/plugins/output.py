@@ -32,6 +32,28 @@ def _require(module, output_format):
         )
 
 
+def _references_pyspark(value):
+    if isinstance(value, (list, tuple)):
+        return any(_references_pyspark(item) for item in value)
+    return type(value).__module__.startswith("pyspark")
+
+
+def strip_spark_attrs(value):
+    """Drop pandas `attrs` entries that hold pyspark objects, in place.
+
+    Spark Connect's toPandas() stores query metrics in `DataFrame.attrs` as pyspark
+    objects. Left in, unpickling the artifact needs pyspark in every step that reads it,
+    including steps whose environment has no Spark at all.
+    """
+    if not type(value).__module__.startswith("pandas"):
+        return value
+    attrs = getattr(value, "attrs", None)
+    if attrs:
+        for key in [k for k, v in attrs.items() if _references_pyspark(v)]:
+            del attrs[key]
+    return value
+
+
 def from_spark_dataframe(df, output_format):
     """Materialize a live Spark DataFrame according to `output_format`."""
     validate_format(output_format)
@@ -43,7 +65,7 @@ def from_spark_dataframe(df, output_format):
         return df
     if output_format == "pandas":
         _require("pandas", output_format)
-        return df.toPandas()
+        return strip_spark_attrs(df.toPandas())
     if output_format == "arrow":
         _require("pyarrow", output_format)
         return _spark_to_arrow(df)

@@ -8,17 +8,18 @@ version = "0.1.0"
 description = "Spark and Databricks decorators for Metaflow"
 authors = [{ name = "Ville Tuulos", email = "ville@outerbounds.co" }]
 requires-python = ">=3.9"
-dependencies = ["metaflow"]
+# No hard metaflow dependency: it would install PyPI metaflow over ob-metaflow on
+# Outerbounds, since both own the same `metaflow` package directory.
+dependencies = []
 
 [project.optional-dependencies]
+metaflow = ["metaflow"]
 # Databricks Connect brings its own pyspark; installing both breaks the import.
 databricks = ["databricks-sdk>=0.86", "databricks-connect>=15.4"]
 catalog = ["deltalake>=0.18", "pyarrow"]
 local = ["pyspark>=3.5"]
 emr = ["boto3"]
 
-[tool.setuptools]
-py-modules = ["metaflow_extensions"]
-
 [tool.setuptools.packages.find]
-include = ["metaflow_extensions.*"]
+include = ["metaflow_extensions*"]
+namespaces = true

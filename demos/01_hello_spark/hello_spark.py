@@ -17,16 +17,20 @@ answer you can run rather than argue about. Every one of those environment varia
 instead be a decorator attribute or a key in a config artifact; see demo 2.
 """
 
+from _env import spark_backend_kind, step_env
+
 from metaflow import FlowSpec, Parameter, spark, step
 
 
 class HelloSparkFlow(FlowSpec):
     rows = Parameter("rows", default=1_000_000)
 
+    @step_env()
     @step
     def start(self):
         self.next(self.crunch)
 
+    @step_env(spark_backend_kind())
     @spark
     @step
     def crunch(self):
@@ -35,7 +39,7 @@ class HelloSparkFlow(FlowSpec):
         print("Spark %s" % session.version)
 
         df = session.range(self.rows).selectExpr(
-            "id", "id %% 7 AS bucket", "rand(42) AS value"
+            "id", "id % 7 AS bucket", "rand(42) AS value"
         )
         summary = (
             df.groupBy("bucket")
@@ -48,6 +52,7 @@ class HelloSparkFlow(FlowSpec):
         self.spark_version = session.version
         self.next(self.end)
 
+    @step_env()
     @step
     def end(self):
         print(self.summary.to_string(index=False))

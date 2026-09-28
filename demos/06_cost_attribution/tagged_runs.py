@@ -22,10 +22,11 @@ attribution works differently, see the README.
 import os
 import time
 
-from metaflow import FlowSpec, Parameter, UnityCatalogTable, current, spark, step
-
 import workload
+from _env import step_env
 from durations import run_durations
+
+from metaflow import FlowSpec, Parameter, UnityCatalogTable, current, spark, step
 
 RUNTIME = "15.4.x-scala2.12"
 NODE_TYPE = os.environ.get("DEMO_NODE_TYPE", "i3.xlarge")
@@ -38,11 +39,13 @@ class TaggedRunsFlow(FlowSpec):
     rows = Parameter("rows", default=20_000_000)
     table = Parameter("table", default="samples.bakehouse.sales_transactions")
 
+    @step_env("pyspark")
     @step
     def start(self):
         self.row_count = self.rows
         self.next(self.on_serverless, self.on_pool, self.on_new_cluster, self.no_compute)
 
+    @step_env("pyspark")
     @spark(
         backend="databricks",
         mode="job",
@@ -58,6 +61,7 @@ class TaggedRunsFlow(FlowSpec):
         self.spark_step = current.step_name
         self.next(self.compare)
 
+    @step_env("pyspark")
     @spark(
         backend="databricks",
         mode="job",
@@ -75,6 +79,7 @@ class TaggedRunsFlow(FlowSpec):
         self.spark_step = current.step_name
         self.next(self.compare)
 
+    @step_env("pyspark")
     @spark(
         backend="databricks",
         mode="job",
@@ -92,6 +97,7 @@ class TaggedRunsFlow(FlowSpec):
         self.spark_step = current.step_name
         self.next(self.compare)
 
+    @step_env("pyspark", "vending")
     @step
     def no_compute(self):
         """The zero-DBU baseline: read the governed table without starting anything."""
@@ -106,6 +112,7 @@ class TaggedRunsFlow(FlowSpec):
         )
         self.next(self.compare)
 
+    @step_env("pyspark")
     @step
     def compare(self, inputs):
         self.run_id = current.run_id
@@ -128,6 +135,7 @@ class TaggedRunsFlow(FlowSpec):
         )
         self.next(self.end)
 
+    @step_env("pyspark")
     @step
     def end(self):
         print(

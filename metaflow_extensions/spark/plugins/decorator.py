@@ -12,7 +12,7 @@ from .config import backend_config, resolve_config
 from .context import SparkJobContext, log
 from .cost import build_tags
 from .exceptions import SparkConfigError
-from .output import from_spark_dataframe, validate_format
+from .output import from_spark_dataframe, strip_spark_attrs, validate_format
 
 #: Attributes that describe the compute or the workspace rather than the step, and so
 #: belong in the resolved backend's own config section.
@@ -372,6 +372,10 @@ def _run_session(deco, backend, ctx, step_func, flow, attrs, output_format):
         finally:
             current._update_env({"spark": None})
 
+    # Covers the step body's own toPandas() calls, which never pass through
+    # from_spark_dataframe.
+    for value in vars(flow).values():
+        strip_spark_attrs(value)
     _cleanup_output(flow, attrs)
 
 

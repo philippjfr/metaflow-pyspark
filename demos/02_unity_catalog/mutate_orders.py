@@ -6,6 +6,8 @@ Appends a day of rows, which bumps the table's Delta version. Run this between
 `governed_read.py` and `reproduce.py`.
 """
 
+from _env import step_env
+
 from metaflow import FlowSpec, Parameter, spark, step
 
 
@@ -13,6 +15,7 @@ class MutateOrdersFlow(FlowSpec):
     table = Parameter("table", default="main.retail.orders")
     rows = Parameter("rows", default=1000)
 
+    @step_env("connect")
     @spark(backend="databricks")
     @step
     def start(self):
@@ -35,6 +38,7 @@ class MutateOrdersFlow(FlowSpec):
         print("version after:  %s" % self.version)
         self.next(self.end)
 
+    @step_env()
     @step
     def end(self):
         print("table is now at v%s; earlier runs still point at their own version"

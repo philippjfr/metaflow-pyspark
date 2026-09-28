@@ -13,6 +13,7 @@ The job function receives a session and returns a DataFrame. `jobs/etl.py` impor
 `jobs/` package ships, not just the one file naming the entry point.
 """
 
+from _env import step_env
 from jobs import etl
 
 from metaflow import FlowSpec, Parameter, spark, step
@@ -21,11 +22,13 @@ from metaflow import FlowSpec, Parameter, spark, step
 class PhotonJobFlow(FlowSpec):
     cutoff = Parameter("cutoff", default=100.0)
 
+    @step_env("pyspark")
     @step
     def start(self):
         self.cutoff_value = self.cutoff
         self.next(self.crunch)
 
+    @step_env("pyspark")
     @spark(
         backend="databricks",
         mode="job",
@@ -42,6 +45,7 @@ class PhotonJobFlow(FlowSpec):
         print(self.spark_df.to_string(index=False))
         self.next(self.end)
 
+    @step_env("pyspark")
     @step
     def end(self):
         pass

@@ -5,9 +5,14 @@ from metaflow_extensions.spark.plugins.decorator import (
     SparkDecorator,
     _collect_inputs,
     _resolve,
+    _run_session,
 )
 from metaflow_extensions.spark.plugins.exceptions import SparkConfigError
-from metaflow_extensions.spark.plugins.output import FORMATS, validate_format
+from metaflow_extensions.spark.plugins.output import (
+    FORMATS,
+    strip_spark_attrs,
+    validate_format,
+)
 
 
 class Flow:
@@ -147,3 +152,44 @@ def test_a_non_callable_job_is_rejected_at_step_init():
 def test_a_bad_output_format_is_rejected_at_step_init():
     with pytest.raises(SparkConfigError):
         make_decorator(SparkDecorator, output_format="hdf5")
+
+
+# ----------------------------------------------------------------------
+class PlanMetrics:
+    """Stands in for the pyspark object Spark Connect's toPandas() puts in attrs."""
+
+
+PlanMetrics.__module__ = "pyspark.sql.connect.client.core"
+
+
+def _connect_frame():
+    pandas = pytest.importorskip("pandas")
+    frame = pandas.DataFrame({"bucket": [0, 1]})
+    frame.attrs["metrics"] = [PlanMetrics()]
+    frame.attrs["source"] = "orders"
+    return frame
+
+
+def test_pyspark_attrs_are_stripped_and_others_kept():
+    frame = strip_spark_attrs(_connect_frame())
+    assert frame.attrs == {"source": "orders"}
+
+
+def test_a_session_step_strips_pyspark_attrs_from_its_artifacts():
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    class Backend:
+        @contextmanager
+        def session(self, ctx):
+            yield object()
+
+    flow = Flow()
+
+    def step_func():
+        flow.summary = _connect_frame()
+
+    ctx = SimpleNamespace(job_func=None)
+    _run_session(None, Backend(), ctx, step_func, flow, attrs(), "pandas")
+    assert "metrics" not in flow.summary.attrs
+    assert not hasattr(flow, "spark")

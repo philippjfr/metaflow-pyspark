@@ -11,6 +11,8 @@ over the results and training somewhere else.
 resolved to an id at submit time, so a job recreated by a bundle deploy keeps working.
 """
 
+from _env import step_env
+
 from metaflow import (
     FlowSpec,
     Parameter,
@@ -33,6 +35,7 @@ FALLBACK_TABLE = "samples.bakehouse.sales_transactions"
 class OrchestrateFlow(FlowSpec):
     as_of = Parameter("as-of", default="2026-08-24")
 
+    @step_env()
     @step
     def start(self):
         self.run_date = self.as_of
@@ -41,6 +44,7 @@ class OrchestrateFlow(FlowSpec):
     # The SLA controls are Metaflow's own and work the same here as on any other step:
     # `timeout` cancels the Databricks run rather than orphaning it, and `retry`
     # resubmits. Deploy-time alerting is a scheduler flag, see the README.
+    @step_env()
     @timeout(minutes=45)
     @retry(times=2)
     @databricks_job(job_name="raw-orders-ingest", parameters_from=["run_date"])
@@ -50,6 +54,7 @@ class OrchestrateFlow(FlowSpec):
         print("ingest task values: %s" % self.databricks_result)
         self.next(self.join)
 
+    @step_env()
     @databricks_job(
         job_name="customer-enrichment",
         parameters_from=["run_date"],
@@ -60,6 +65,7 @@ class OrchestrateFlow(FlowSpec):
         print("enrichment task values: %s" % self.enrichment)
         self.next(self.join)
 
+    @step_env()
     @step
     def join(self, inputs):
         self.run_date = inputs.ingest.run_date
@@ -80,6 +86,7 @@ class OrchestrateFlow(FlowSpec):
         print("tables produced upstream: %s" % ", ".join(self.tables))
         self.next(self.validate)
 
+    @step_env()
     @databricks_notebook(
         notebook_path=VALIDATE_NOTEBOOK,
         parameters_from=["run_date"],
@@ -91,6 +98,7 @@ class OrchestrateFlow(FlowSpec):
         print("notebook returned: %s" % self.notebook_result)
         self.next(self.profile, foreach="tables")
 
+    @step_env("vending")
     @step
     def profile(self):
         """One branch per upstream table, which is the part Workflows does not do well.
@@ -110,11 +118,13 @@ class OrchestrateFlow(FlowSpec):
         print(self.table_stats)
         self.next(self.report)
 
+    @step_env()
     @step
     def report(self, inputs):
         self.stats = [i.table_stats for i in inputs]
         self.next(self.end)
 
+    @step_env()
     @step
     def end(self):
         for stats in self.stats:

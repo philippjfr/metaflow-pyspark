@@ -48,6 +48,10 @@ pip install -e '.[local]'           # local pyspark, needs a JVM
 pip install -e '.[emr]'             # EMR Serverless
 ```
 
+Metaflow is not a hard dependency, so the extension installs next to `outerbounds` without
+pulling PyPI `metaflow` over `ob-metaflow`. On open-source Metaflow, add the `metaflow` extra:
+`pip install -e '.[metaflow,databricks]'`.
+
 `databricks-connect` bundles its own `pyspark`. Do not install `[local]` and
 `[databricks]` into the same environment; the extension detects that clash and says so
 instead of letting the import error point nowhere useful.

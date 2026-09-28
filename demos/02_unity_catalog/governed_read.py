@@ -13,6 +13,8 @@ grant:
 
     DATABRICKS_CONFIG_PROFILE=restricted python governed_read.py run
 """
+from _env import step_env
+
 from metaflow import (
     FlowSpec,
     Parameter,
@@ -27,6 +29,7 @@ class GovernedReadFlow(FlowSpec):
     table = Parameter("table", default="main.retail.orders")
     output_table = Parameter("output-table", default="main.retail.orders_daily")
 
+    @step_env("vending")
     @step
     def start(self):
         self.orders = UnityCatalogTable(self.table)
@@ -34,6 +37,7 @@ class GovernedReadFlow(FlowSpec):
         print("storage location: %s" % self.orders.storage_location)
         self.next(self.summarize)
 
+    @step_env("connect")
     @spark(backend="databricks", tags={"cost_center": "ml-platform"})
     @step
     def summarize(self):
@@ -62,6 +66,7 @@ class GovernedReadFlow(FlowSpec):
         self.preview = daily.limit(20).toPandas()
         self.next(self.end)
 
+    @step_env()
     @step
     def end(self):
         print(self.preview.to_string(index=False))

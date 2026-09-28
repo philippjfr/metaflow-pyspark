@@ -450,6 +450,11 @@ class UnityCatalogTable:
         try:
             con.install_extension(extension)
             con.load_extension(extension)
+            if extension == "azure":
+                # The Azure SDK's default transport looks for a CA bundle at a path
+                # many container images lack, failing with "Problem with the SSL CA
+                # cert". The curl transport probes the usual locations instead.
+                con.execute("SET azure_transport_option_type = 'curl'")
             con.install_extension("delta")
             con.load_extension("delta")
             con.execute(secret_sql, secret_params)

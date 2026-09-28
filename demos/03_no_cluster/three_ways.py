@@ -29,6 +29,8 @@ opinion. Print the numbers for the customer's own table and the choice makes its
 
 import time
 
+from _env import step_env
+
 from metaflow import FlowSpec, Parameter, UnityCatalogTable, UnityCatalogError, spark, step
 from metaflow_extensions.spark.plugins.exceptions import SparkConfigError
 from metaflow_extensions.spark.plugins.warehouse import query
@@ -38,12 +40,14 @@ class ThreeWaysFlow(FlowSpec):
     table = Parameter("table", default="main.retail.orders")
     warehouse_id = Parameter("warehouse-id", default=None)
 
+    @step_env("vending")
     @step
     def start(self):
         self.orders = UnityCatalogTable(self.table)
         print("reading %r" % self.orders)
         self.next(self.through_vending, self.through_spark, self.through_warehouse)
 
+    @step_env("vending")
     @step
     def through_vending(self):
         """No cluster. UC vends credentials, delta-rs reads, DuckDB aggregates."""
@@ -74,6 +78,7 @@ class ThreeWaysFlow(FlowSpec):
         print("vended read in %.1fs, %d groups" % (self.vended_seconds, self.vended_rows))
         self.next(self.compare)
 
+    @step_env("connect")
     @spark(backend="databricks", tags={"read_path": "spark"})
     @step
     def through_spark(self):
@@ -92,6 +97,7 @@ class ThreeWaysFlow(FlowSpec):
         print("spark read in %.1fs" % self.spark_seconds)
         self.next(self.compare)
 
+    @step_env()
     @step
     def through_warehouse(self):
         """The same aggregate, submitted as a statement to a SQL warehouse.
@@ -129,6 +135,7 @@ class ThreeWaysFlow(FlowSpec):
         )
         self.next(self.compare)
 
+    @step_env()
     @step
     def compare(self, inputs):
         self.merge_artifacts(inputs, include=["orders"])
@@ -158,6 +165,7 @@ class ThreeWaysFlow(FlowSpec):
         )
         self.next(self.end)
 
+    @step_env()
     @step
     def end(self):
         pass

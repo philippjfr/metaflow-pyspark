@@ -8,12 +8,15 @@ By default this picks up the latest successful `GovernedReadFlow`; pass
 `--origin-run <run_id>` to replay a specific one.
 """
 
+from _env import step_env
+
 from metaflow import Flow, FlowSpec, Parameter, Run, spark, step
 
 
 class ReproduceFlow(FlowSpec):
     origin_run = Parameter("origin-run", default=None, type=str)
 
+    @step_env()
     @step
     def start(self):
         origin = (
@@ -30,6 +33,7 @@ class ReproduceFlow(FlowSpec):
         print("as seen by that run: %r" % self.orders)
         self.next(self.compare)
 
+    @step_env("connect")
     @spark(backend="databricks")
     @step
     def compare(self):
@@ -42,6 +46,7 @@ class ReproduceFlow(FlowSpec):
         self.latest_rows = latest.to_spark(self.spark).count()
         self.next(self.end)
 
+    @step_env()
     @step
     def end(self):
         def fmt(version):
