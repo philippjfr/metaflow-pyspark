@@ -1,0 +1,125 @@
+"""Configuration resolution.
+
+Precedence, lowest to highest:
+
+    1. defaults
+    2. environment variables (METAFLOW_DATABRICKS_*, DATABRICKS_*)
+    3. the flow-level config artifact named by the `config` argument
+    4. explicit arguments
+
+The flow-level artifact may be a dict, a JSON string, or an ``IncludeFile``, which
+keeps the original ``spark_config`` idiom working. Databricks settings live under its
+``databricks`` key.
+"""
+
+import json
+import os
+
+from .exceptions import SparkConfigError
+
+DEFAULT_TIMEOUT_MINUTES = 60
+
+
+def _deep_merge(base, override):
+    """Recursively merge `override` into `base`, returning a new dict."""
+    out = dict(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        elif value is not None:
+            out[key] = value
+    return out
+
+
+def _coerce(value, what):
+    """Turn a dict, a JSON string, or an IncludeFile into a dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError as exc:
+            raise SparkConfigError(
+                "Could not parse %s as JSON: %s" % (what, exc)
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise SparkConfigError(
+                "%s must be a JSON object, got %s." % (what, type(parsed).__name__)
+            )
+        return parsed
+    raise SparkConfigError(
+        "%s must be a dict, a JSON string, or an IncludeFile, got %s."
+        % (what, type(value).__name__)
+    )
+
+
+def _env_config():
+    """Read configuration out of the environment."""
+    databricks = {}
+    # Honour the standard Databricks environment variables so that a workspace
+    # already configured for the CLI or the SDK needs no extra Metaflow config.
+    for key, envs in (
+        ("host", ("METAFLOW_DATABRICKS_HOST", "DATABRICKS_HOST")),
+        ("token", ("METAFLOW_DATABRICKS_TOKEN", "DATABRICKS_TOKEN")),
+        ("profile", ("METAFLOW_DATABRICKS_PROFILE", "DATABRICKS_CONFIG_PROFILE")),
+        ("client_id", ("METAFLOW_DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_ID")),
+        (
+            "client_secret",
+            ("METAFLOW_DATABRICKS_CLIENT_SECRET", "DATABRICKS_CLIENT_SECRET"),
+        ),
+        (
+            "warehouse_id",
+            ("METAFLOW_DATABRICKS_WAREHOUSE_ID", "DATABRICKS_WAREHOUSE_ID"),
+        ),
+    ):
+        for env in envs:
+            value = os.environ.get(env)
+            if value:
+                databricks[key] = value
+                break
+    return {"databricks": databricks} if databricks else {}
+
+
+def resolve_config(flow, config_attr, overrides):
+    """Build the effective config dict.
+
+    `config_attr` is either a dict/JSON string used directly, or the name of a flow
+    attribute holding one. A missing named attribute is not an error: the environment
+    and explicit arguments may configure everything.
+    """
+    from_flow = {}
+    if isinstance(config_attr, str):
+        raw = getattr(flow, config_attr, None)
+        if raw is not None:
+            from_flow = _coerce(raw, "the '%s' artifact" % config_attr)
+    elif config_attr is not None:
+        from_flow = _coerce(config_attr, "the config argument")
+
+    config = _deep_merge(_env_config(), from_flow)
+    config = _deep_merge(config, overrides or {})
+
+    config.setdefault("timeout", DEFAULT_TIMEOUT_MINUTES)
+    config.setdefault("databricks", {})
+    return config
+
+
+def backend_config(config, backend_name):
+    """Return the config section a single backend should see."""
+    section = dict(config.get(backend_name) or {})
+    section.setdefault("timeout", config.get("timeout"))
+    return section
+
+
+def require(section, key, backend_name, hint=None):
+    """Fetch a required config key, or raise a message that says how to set it."""
+    value = section.get(key)
+    if value in (None, ""):
+        msg = "The '%s' backend requires '%s' to be set." % (backend_name, key)
+        if hint:
+            msg += "\n" + hint
+        raise SparkConfigError(msg)
+    return value
