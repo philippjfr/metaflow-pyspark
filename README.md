@@ -3,6 +3,8 @@
 
 ## Spark sessions, submitted jobs, and governed Databricks data
 
+Documentation: https://outerbounds.github.io/metaflow-pyspark/
+
 ```bash
 pip install -e '.[local]'              # @spark with a local Spark session, needs a JVM
 pip install -e '.[connect]'            # @spark on Databricks through Spark Connect
