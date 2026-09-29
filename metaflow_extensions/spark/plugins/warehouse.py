@@ -20,9 +20,12 @@ decorator: any step can call it, with no compute configuration and no live sessi
 `params` are bound as named, typed parameters through the Statement Execution API's
 ``:name`` markers, never concatenated into the statement text.
 
-The warehouse is an explicit ``warehouse_id=``, else the configured default
-(``warehouse_id`` in the ``databricks`` config section, or
-``METAFLOW_DATABRICKS_WAREHOUSE_ID`` / ``DATABRICKS_WAREHOUSE_ID``).
+The target is an explicit ``warehouse_id=``, else the live session of an enclosing
+``@spark`` step (its compute is already running and paid for), else the configured
+default warehouse (``warehouse_id`` in the ``databricks`` config section, or
+``METAFLOW_DATABRICKS_WAREHOUSE_ID`` / ``DATABRICKS_WAREHOUSE_ID``). The session path
+uses the same ``:name`` parameter syntax, so the statement does not change between the
+two.
 
 Unlike a pinned ``UnityCatalogTable``, an arbitrary statement is not reproducible: the
 tables underneath it can move between runs, and this module does not rewrite user SQL to
@@ -36,6 +39,8 @@ statement id and warehouse URL are visible in the task's log output.
 Cost attribution is via `query_tags` (public preview, needs `databricks-sdk>=0.86`),
 which land in `system.query.history`, not `system.billing.usage`.
 """
+
+import functools
 
 from .config import backend_config, require, resolve_config
 from .context import TaskContext, log
@@ -85,6 +90,21 @@ def query(
     overrides = {}
     if timeout is not None:
         overrides["timeout"] = timeout
+    if not warehouse_id:
+        session = _live_session()
+        if session is not None:
+            return _query_via_session(
+                session,
+                statement,
+                params,
+                output_format,
+                crash_on_failure,
+                catalog=catalog,
+                schema=schema,
+                row_limit=row_limit,
+                byte_limit=byte_limit,
+            )
+
     resolved = resolve_config(flow, config, overrides)
     section = dict(backend_config(resolved, "databricks"))
     if warehouse_id:
@@ -113,6 +133,38 @@ def query(
     return backend.read_output(handle, output_format)
 
 
+def _live_session():
+    """The session an enclosing @spark step established, if any."""
+    from metaflow import current
+
+    return getattr(current, "spark", None)
+
+
+def _query_via_session(
+    session, statement, params, output_format, crash_on_failure, **options
+):
+    from .output import from_spark_dataframe
+
+    unsupported = sorted(
+        k for k in ("catalog", "schema", "byte_limit") if options.get(k) is not None
+    )
+    if unsupported:
+        raise SparkConfigError(
+            "query(%s=...) only applies on a SQL warehouse, and this call runs through "
+            "the step's Spark session. Qualify table names in the statement, or pass "
+            "warehouse_id= to run on a warehouse." % ", ".join(unsupported)
+        )
+    try:
+        df = session.sql(statement, args=params or None)
+        if options.get("row_limit") is not None:
+            df = df.limit(options["row_limit"])
+        return from_spark_dataframe(df, output_format)
+    except Exception:
+        if crash_on_failure:
+            raise
+        return None
+
+
 def _build_context(resolved, tags):
     from metaflow import current
 
@@ -126,7 +178,7 @@ def _build_context(resolved, tags):
         user=_username(),
         tags={},
         timeout_minutes=resolved.get("timeout"),
-        logger=log,
+        logger=functools.partial(log, prefix="query"),
     )
     ctx.tags = build_tags(ctx, extra=tags)
     return ctx

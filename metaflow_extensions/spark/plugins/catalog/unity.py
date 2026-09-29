@@ -266,7 +266,7 @@ class UnityCatalogTable:
         return (
             "Read it through a SQL warehouse instead, which applies the table's "
             'grants, views, and protocol, e.g. query("SELECT * FROM %s"), or through '
-            "an existing Spark session with to_spark()." % source
+            "Spark with to_spark(self.spark) in an @spark step." % source
         )
 
     # ------------------------------------------------------------------
@@ -600,8 +600,9 @@ class UnityCatalogTable:
     def to_spark(self, session):
         """Read through Spark, honouring the pinned version.
 
-        This is the path that keeps every read inside Unity Catalog's enforcement, and
-        the right choice for large tables or anything join-heavy.
+        Pass the session of an ``@spark`` step (``self.spark``). This path keeps every
+        read inside Unity Catalog's enforcement, and is the right choice for large
+        tables or anything join-heavy.
         """
         reader = session.read
         if self.version is not None:

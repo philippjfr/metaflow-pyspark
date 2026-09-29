@@ -1,14 +1,21 @@
-"""Backend abstraction.
+"""Backend abstractions.
 
-A backend submits a statement, polls it, and cancels it. Only the provider-specific
-calls live in a backend; polling, backoff, timeouts, cancellation, and error
-classification live here.
+``SessionBackend``
+    Hands a live ``SparkSession`` to an ``@spark`` step, which runs in the Metaflow
+    task process. Spark operations execute in-process (local Spark) or on Databricks
+    compute (Spark Connect).
+
+``StatementBackend``
+    Submits a SQL statement, polls it, and cancels it. Only the provider-specific calls
+    live in a backend; polling, backoff, timeouts, cancellation, and error
+    classification live here.
 """
 
 import signal
 import threading
 import time
 from contextlib import contextmanager
+from importlib import import_module
 
 from ..context import JobState
 from ..exceptions import (
@@ -22,6 +29,19 @@ from ..exceptions import (
 POLL_INTERVAL_SECONDS = 5
 STATUS_MESSAGE_INTERVAL_SECONDS = 60
 CONTROL_PLANE_RETRIES = 6
+
+
+class SessionBackend:
+    #: registry key, e.g. "local"
+    name = None
+
+    def __init__(self, config, ctx=None):
+        self.config = config
+        self.ctx = ctx
+
+    def session(self, ctx):
+        """A context manager yielding a live SparkSession for the step's duration."""
+        raise NotImplementedError
 
 
 class StatementBackend:
@@ -217,3 +237,57 @@ def _cancel_on_signal(backend, ctx, handle):
                 signal.signal(signum, old)
             except (ValueError, OSError):
                 pass
+
+
+# ----------------------------------------------------------------------
+# session backend registry
+# ----------------------------------------------------------------------
+# Lazily resolved so that importing this package never pulls in pyspark or
+# databricks-connect. Values are "module:attribute" relative to this package.
+_SESSION_BACKENDS = {
+    "local": ".local:LocalSparkBackend",
+    "databricks": ".databricks.connect:DatabricksConnectBackend",
+}
+
+#: Accepted spellings for backend names.
+_ALIASES = {
+    "databricks-connect": "databricks",
+    "databricks_connect": "databricks",
+    "connect": "databricks",
+    "dbx": "databricks",
+}
+
+
+def canonical_backend(name):
+    """The registry key for `name`, which is also its config section."""
+    if not isinstance(name, str):
+        raise SparkException(
+            "@spark(backend=...) must be a string, got %r. Available backends: %s."
+            % (name, ", ".join(available_backends()))
+        )
+    key = _ALIASES.get(name, name)
+    if key not in _SESSION_BACKENDS:
+        raise SparkException(
+            "Unknown @spark backend '%s'. Available backends: %s."
+            % (name, ", ".join(available_backends()))
+        )
+    return key
+
+
+def register_backend(name, target):
+    """Register a session backend. `target` is a class or a "module:attribute" string."""
+    _SESSION_BACKENDS[name] = target
+
+
+def available_backends():
+    return sorted(_SESSION_BACKENDS)
+
+
+def get_backend_class(name):
+    key = canonical_backend(name)
+    target = _SESSION_BACKENDS[key]
+    if isinstance(target, str):
+        module_path, _, attr = target.partition(":")
+        target = getattr(import_module(module_path, package=__name__), attr)
+        _SESSION_BACKENDS[key] = target
+    return target

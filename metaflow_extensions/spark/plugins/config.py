@@ -3,13 +3,15 @@
 Precedence, lowest to highest:
 
     1. defaults
-    2. environment variables (METAFLOW_DATABRICKS_*, DATABRICKS_*)
+    2. the Metaflow config and environment variables (METAFLOW_SPARK_BACKEND,
+       METAFLOW_DATABRICKS_*, DATABRICKS_*)
     3. the flow-level config artifact named by the `config` argument
     4. explicit arguments
 
 The flow-level artifact may be a dict, a JSON string, or an ``IncludeFile``, which
-keeps the original ``spark_config`` idiom working. Databricks settings live under its
-``databricks`` key.
+keeps the original ``spark_config`` idiom working. It holds a top-level ``backend``,
+backend-neutral ``spark-parameters``, and one section per backend (``databricks``,
+``local``).
 """
 
 import json
@@ -18,6 +20,7 @@ import os
 from .exceptions import SparkConfigError
 
 DEFAULT_TIMEOUT_MINUTES = 60
+DEFAULT_BACKEND = "local"
 
 #: Keys that must never be written into an artifact.
 SECRET_KEYS = ("token", "client_secret")
@@ -61,7 +64,16 @@ def _coerce(value, what):
 
 
 def _env_config():
-    """Read configuration out of the environment."""
+    """Read configuration out of the Metaflow config and the environment."""
+    # Imported here: this module is reachable from plugin modules Metaflow imports
+    # while `metaflow/__init__` is still executing.
+    from metaflow.metaflow_config_funcs import from_conf
+
+    config = {}
+    backend = from_conf("SPARK_BACKEND")
+    if backend:
+        config["backend"] = backend
+
     databricks = {}
     # Honour the standard Databricks environment variables so that a workspace
     # already configured for the CLI or the SDK needs no extra Metaflow config.
@@ -78,13 +90,16 @@ def _env_config():
             "warehouse_id",
             ("METAFLOW_DATABRICKS_WAREHOUSE_ID", "DATABRICKS_WAREHOUSE_ID"),
         ),
+        ("cluster_id", ("METAFLOW_DATABRICKS_CLUSTER_ID", "DATABRICKS_CLUSTER_ID")),
     ):
         for env in envs:
             value = os.environ.get(env)
             if value:
                 databricks[key] = value
                 break
-    return {"databricks": databricks} if databricks else {}
+    if databricks:
+        config["databricks"] = databricks
+    return config
 
 
 def flow_config(flow, config_attr):
@@ -107,14 +122,24 @@ def resolve_config(flow, config_attr, overrides):
     config = _deep_merge(_env_config(), flow_config(flow, config_attr))
     config = _deep_merge(config, overrides or {})
 
+    config.setdefault("backend", DEFAULT_BACKEND)
     config.setdefault("timeout", DEFAULT_TIMEOUT_MINUTES)
     config.setdefault("databricks", {})
     return config
 
 
 def backend_config(config, backend_name):
-    """Return the config section a single backend should see."""
+    """Return the config section a single backend should see.
+
+    Backend-neutral `spark-parameters` are merged underneath the backend's own, so a
+    backend-specific value wins.
+    """
     section = dict(config.get(backend_name) or {})
+    neutral = config.get("spark-parameters") or {}
+    if neutral:
+        section["spark-parameters"] = _deep_merge(
+            neutral, section.get("spark-parameters") or {}
+        )
     section.setdefault("timeout", config.get("timeout"))
     return section
 

@@ -71,8 +71,7 @@ class TaskContext:
             log(msg, job_id=job_id, stream=stream)
 
 
-def log(msg, job_id=None, stream="stdout"):
-    prefix = "query"
+def log(msg, job_id=None, stream="stdout", prefix="@spark"):
     if job_id:
         prefix += "[%s]" % job_id
     print("%s: %s" % (prefix, msg), file=getattr(sys, stream), flush=True)

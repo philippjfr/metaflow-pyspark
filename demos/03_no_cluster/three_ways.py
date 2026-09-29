@@ -1,12 +1,15 @@
-"""Demo 3: the same governed table, read two ways, neither of which starts a cluster.
+"""Demo 3: the same governed table, read three ways.
 
-    python two_ways.py run --table main.retail.orders --warehouse-id <id>
+    python three_ways.py run --table main.retail.orders --warehouse-id <id>
 
 Reads `main.retail.orders`, the table demo 2 creates and mutates. If it does not exist
 yet, seed it first: see "Seed data" in `../02_unity_catalog/README.md`.
 
-Both branches read the same Unity Catalog table, and both are governed by UC. The
+All three branches read the same Unity Catalog table, and all are governed by UC. The
 difference is what runs the read:
+
+*Through Spark* (`through_spark`): the query executes on Databricks compute through
+Spark Connect, at the pinned version. The right answer for large tables and joins.
 
 *Through credential vending* (`through_vending`): UC hands out a short-lived,
 table-scoped cloud credential and the Metaflow task reads the Delta files itself, at the
@@ -15,8 +18,7 @@ DBUs and no cold start. The right answer for mid-size reads with no engine-enfor
 constructs in the way.
 
 *Through a SQL warehouse* (`through_warehouse`): the same aggregate, submitted as a
-statement to a warehouse via `query()`. No Spark session or cluster-shape config is
-involved; unlike vending, the statement goes through the query engine, so views, row
+statement to a warehouse via `query()`. Like vending, no Spark session is involved; unlike vending, the statement goes through the query engine, so views, row
 filters, and column masks are respected. Needs `--warehouse-id`, or
 `DATABRICKS_WAREHOUSE_ID` in the environment; the branch is skipped with an explanation
 if neither is set, the same way the vending branch is skipped on a refused grant.
@@ -26,12 +28,19 @@ import time
 
 from _env import step_env
 
-from metaflow import FlowSpec, Parameter, UnityCatalogError, UnityCatalogTable, step
+from metaflow import (
+    FlowSpec,
+    Parameter,
+    UnityCatalogError,
+    UnityCatalogTable,
+    spark,
+    step,
+)
 from metaflow_extensions.spark.plugins.exceptions import SparkConfigError
 from metaflow_extensions.spark.plugins.warehouse import query
 
 
-class TwoWaysFlow(FlowSpec):
+class ThreeWaysFlow(FlowSpec):
     table = Parameter("table", default="main.retail.orders")
     warehouse_id = Parameter("warehouse-id", default=None)
 
@@ -40,7 +49,7 @@ class TwoWaysFlow(FlowSpec):
     def start(self):
         self.orders = UnityCatalogTable(self.table)
         print("reading %r" % self.orders)
-        self.next(self.through_vending, self.through_warehouse)
+        self.next(self.through_vending, self.through_spark, self.through_warehouse)
 
     @step_env("vending")
     @step
@@ -67,6 +76,25 @@ class TwoWaysFlow(FlowSpec):
         print(
             "vended read in %.1fs, %d groups" % (self.vended_seconds, len(self.vended))
         )
+        self.next(self.compare)
+
+    @step_env("connect")
+    @spark(backend="databricks")
+    @step
+    def through_spark(self):
+        """The same aggregate, executed on Databricks compute."""
+        from pyspark.sql import functions as F
+
+        started = time.monotonic()
+        self.spark_result = (
+            self.orders.to_spark(self.spark)
+            .groupBy("order_date")
+            .agg(F.count("*").alias("orders"), F.sum("amount").alias("revenue"))
+            .orderBy("order_date")
+            .toPandas()
+        )
+        self.spark_seconds = time.monotonic() - started
+        print("spark read in %.1fs" % self.spark_seconds)
         self.next(self.compare)
 
     @step_env()
@@ -110,6 +138,8 @@ class TwoWaysFlow(FlowSpec):
         for i in inputs:
             if getattr(i, "vended", None) is not None:
                 rows.append(("credential vending", i.vended_seconds, len(i.vended)))
+            if getattr(i, "spark_result", None) is not None:
+                rows.append(("databricks spark", i.spark_seconds, len(i.spark_result)))
             if getattr(i, "warehouse_result", None) is not None:
                 rows.append(
                     ("sql warehouse", i.warehouse_seconds, len(i.warehouse_result))
@@ -127,4 +157,4 @@ class TwoWaysFlow(FlowSpec):
 
 
 if __name__ == "__main__":
-    TwoWaysFlow()
+    ThreeWaysFlow()

@@ -23,6 +23,9 @@ def clean_env(monkeypatch):
     ):
         monkeypatch.delenv(env, raising=False)
         monkeypatch.delenv("METAFLOW_" + env, raising=False)
+    monkeypatch.delenv("DATABRICKS_CLUSTER_ID", raising=False)
+    monkeypatch.delenv("METAFLOW_DATABRICKS_CLUSTER_ID", raising=False)
+    monkeypatch.delenv("METAFLOW_SPARK_BACKEND", raising=False)
 
 
 class Flow:
@@ -31,6 +34,7 @@ class Flow:
 
 def test_defaults_when_nothing_is_configured():
     config = resolve_config(Flow(), "spark_config", {})
+    assert config["backend"] == "local"
     assert config["timeout"] == DEFAULT_TIMEOUT_MINUTES
     assert config["databricks"] == {}
 
@@ -92,6 +96,26 @@ def test_bad_json_names_the_source():
     flow.spark_config = "{not json"
     with pytest.raises(SparkConfigError, match="spark_config"):
         resolve_config(flow, "spark_config", {})
+
+
+def test_the_backend_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv("METAFLOW_SPARK_BACKEND", "databricks")
+    monkeypatch.setenv("DATABRICKS_CLUSTER_ID", "0101-abc")
+    config = resolve_config(None, None, {})
+    assert config["backend"] == "databricks"
+    assert config["databricks"]["cluster_id"] == "0101-abc"
+
+
+def test_backend_specific_spark_parameters_win():
+    config = {
+        "spark-parameters": {"spark.executor.memory": "4g", "spark.shuffle.spill": "1"},
+        "databricks": {"spark-parameters": {"spark.executor.memory": "16g"}},
+    }
+    section = backend_config(config, "databricks")
+    assert section["spark-parameters"] == {
+        "spark.executor.memory": "16g",
+        "spark.shuffle.spill": "1",
+    }
 
 
 def test_backend_config_inherits_the_top_level_timeout():

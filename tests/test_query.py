@@ -141,3 +141,76 @@ def test_an_interrupt_cancels_the_statement(service):
     with pytest.raises(KeyboardInterrupt):
         query("SELECT 1", warehouse_id="wh-1")
     assert service.cancelled == ["stmt-1"]
+
+
+# ----------------------------------------------------------------------
+# inside an @spark step, the live session is the target
+# ----------------------------------------------------------------------
+class FakeSparkFrame:
+    def __init__(self, sql, args):
+        self.sql, self.args, self.limit_n = sql, args, None
+
+    def limit(self, n):
+        self.limit_n = n
+        return self
+
+    def toPandas(self):
+        import pandas
+
+        return pandas.DataFrame({"n": [1]})
+
+
+class FakeSparkSession:
+    def __init__(self, fail=False):
+        self.frames = []
+        self.fail = fail
+
+    def sql(self, statement, args=None):
+        if self.fail:
+            raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] nope")
+        frame = FakeSparkFrame(statement, args)
+        self.frames.append(frame)
+        return frame
+
+
+@pytest.fixture
+def live_session(monkeypatch):
+    from metaflow import current
+
+    session = FakeSparkSession()
+    current._update_env({"spark": session})
+    yield session
+    current._update_env({"spark": None})
+
+
+def test_a_live_session_is_used_instead_of_a_warehouse(service, live_session):
+    result = query("SELECT :n AS n", params={"n": 1}, row_limit=5)
+    frame = live_session.frames[0]
+    assert (frame.sql, frame.args, frame.limit_n) == ("SELECT :n AS n", {"n": 1}, 5)
+    assert result.n.tolist() == [1]
+    assert service.executed == []
+
+
+def test_an_explicit_warehouse_beats_the_live_session(service, live_session):
+    query("SELECT 1", warehouse_id="wh-1", output_format="none")
+    assert service.executed[0]["warehouse_id"] == "wh-1"
+    assert live_session.frames == []
+
+
+def test_warehouse_only_options_are_rejected_on_the_session_path(live_session):
+    with pytest.raises(SparkConfigError, match="catalog"):
+        query("SELECT 1", catalog="main")
+
+
+def test_a_failed_session_statement_returns_none_without_crash_on_failure(
+    monkeypatch,
+):
+    from metaflow import current
+
+    current._update_env({"spark": FakeSparkSession(fail=True)})
+    try:
+        assert query("SELECT nope", crash_on_failure=False) is None
+        with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
+            query("SELECT nope")
+    finally:
+        current._update_env({"spark": None})
