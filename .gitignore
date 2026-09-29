@@ -37,3 +37,7 @@ htmlcov/
 # Local secrets / env files
 .env
 .env.*
+
+# Docs
+builtdocs/
+.pixi/
