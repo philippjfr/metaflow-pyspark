@@ -35,7 +35,7 @@ class GovernedReadFlow(FlowSpec):
     @step_env("vending")
     @step
     def start(self):
-        self.orders = UnityCatalogTable(self.table)
+        self.orders = UnityCatalogTable(self.table, pin="required")
         print("pinned %r" % self.orders)
         print("storage location: %s" % self.orders.storage_location)
         self.next(self.summarize)

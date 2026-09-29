@@ -38,12 +38,10 @@ which land in `system.query.history`, not `system.billing.usage`.
 """
 
 from .config import backend_config, require, resolve_config
-from .context import SparkJobContext, log
+from .context import TaskContext, log
 from .cost import build_tags
 from .exceptions import SparkConfigError
 
-#: A statement result has no live DataFrame and no storage location, so only the
-#: materializing formats apply.
 QUERY_FORMATS = ("pandas", "arrow", "polars", "none")
 
 WAREHOUSE_HINT = (
@@ -74,12 +72,14 @@ def query(
     of the precedence chain. Without it, the warehouse still resolves from
     `METAFLOW_DATABRICKS_WAREHOUSE_ID` / `DATABRICKS_WAREHOUSE_ID` and explicit
     arguments.
+
+    A failed statement raises `QueryFailed`, unless `crash_on_failure=False`, in which
+    case `query()` returns None.
     """
     if output_format not in QUERY_FORMATS:
         raise SparkConfigError(
-            "query(output_format=%r) is not meaningful for a statement result, since "
-            "there is no Spark DataFrame or storage location to reference. Choose one "
-            "of: %s." % (output_format, ", ".join(QUERY_FORMATS))
+            "query(output_format=%r) is not supported. Choose one of: %s."
+            % (output_format, ", ".join(QUERY_FORMATS))
         )
 
     overrides = {}
@@ -102,22 +102,21 @@ def query(
         if value is not None:
             section[key] = value
 
-    ctx = _build_context(flow, section, resolved, tags)
+    ctx = _build_context(resolved, tags)
 
     from .backends.databricks.sql import DatabricksSqlBackend
 
     backend = DatabricksSqlBackend(section, ctx)
-    handle, _ = backend.run(
-        ctx, show_stdout=False, show_stderr=True, crash_on_failure=crash_on_failure
-    )
+    handle, status = backend.run(ctx, crash_on_failure=crash_on_failure)
+    if not status.ok:
+        return None
     return backend.read_output(handle, output_format)
 
 
-def _build_context(flow, section, resolved, tags):
+def _build_context(resolved, tags):
     from metaflow import current
 
-    ctx = SparkJobContext(
-        flow=flow,
+    ctx = TaskContext(
         step_name=current.step_name,
         pathspec=current.pathspec,
         flow_name=current.flow_name,
@@ -125,7 +124,6 @@ def _build_context(flow, section, resolved, tags):
         task_id=current.task_id,
         attempt=getattr(current, "retry_count", 0) or 0,
         user=_username(),
-        config=section,
         tags={},
         timeout_minutes=resolved.get("timeout"),
         logger=log,

@@ -26,55 +26,50 @@ class SparkBackendUnavailable(SparkException):
         super().__init__(msg)
 
 
-class SparkJobFailed(SparkException):
-    """A remote statement or job reached a terminal failure state.
+class QueryFailed(SparkException):
+    """A SQL statement reached a terminal failure state.
 
-    Carries the backend's own error classification so the user does not have to go
-    log spelunking to find out what happened.
+    Carries the warehouse's own error class and message.
     """
 
-    headline = "Spark job failed"
+    headline = "SQL statement failed"
 
-    def __init__(self, status, handle=None, logs=None):
+    def __init__(self, status, handle=None):
         self.status = status
         self.handle = handle
-        lines = ["Spark job failed with state '%s'." % status.state]
+        lines = ["Statement failed with state '%s'." % status.state]
         if status.error_class:
             lines.append("Error class: %s" % status.error_class)
         if status.message:
             lines.append("Message: %s" % status.message)
         if status.ui_url:
-            lines.append("Run details: %s" % status.ui_url)
-        if logs:
-            tail = logs.strip().splitlines()[-40:]
-            lines.append("\nLast %d lines of output:" % len(tail))
-            lines.extend("    " + line for line in tail)
+            lines.append("Warehouse: %s" % status.ui_url)
         super().__init__("\n".join(lines))
 
 
-class SparkJobCancelled(SparkException):
-    headline = "Spark job cancelled"
+class QueryCancelled(SparkException):
+    headline = "SQL statement cancelled"
 
 
-class SparkJobTimeout(SparkException):
-    headline = "Spark job timed out"
+class QueryTimeout(SparkException):
+    headline = "SQL statement timed out"
 
     def __init__(self, timeout_minutes, handle=None):
         self.handle = handle
-        msg = "Spark job did not finish within the %d minute timeout." % timeout_minutes
+        msg = "Statement did not finish within the %d minute timeout." % timeout_minutes
         if handle is not None and handle.ui_url:
-            msg += "\nRun details: %s" % handle.ui_url
+            msg += "\nWarehouse: %s" % handle.ui_url
         super().__init__(msg)
 
 
-class SparkControlPlaneError(SparkException):
-    """The job may or may not be running: we lost the ability to ask.
+class ControlPlaneError(SparkException):
+    """The statement may or may not be running: we lost the ability to ask.
 
-    Deliberately distinct from SparkJobFailed so that a transient outage in the
-    compute provider's API is never reported to the user as a failed job.
+    Deliberately distinct from QueryFailed so that a transient outage in the
+    provider's API is never reported to the user as a failed statement.
     """
 
-    headline = "Lost contact with the Spark control plane"
+    headline = "Lost contact with the Databricks control plane"
 
 
 class UnityCatalogError(SparkException):

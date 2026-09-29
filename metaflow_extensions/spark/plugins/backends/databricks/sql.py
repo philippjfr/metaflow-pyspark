@@ -20,11 +20,10 @@ code path for reading results, rather than branching between an inline JSON deco
 small results and a chunked Arrow reader for large ones, and it means a result is always
 real Arrow-typed data rather than the string-encoded values ``JSON_ARRAY`` returns.
 
-Cost attribution here is best-effort and different from the Jobs API's ``custom_tags``:
-the Statement Execution API instead takes ``query_tags`` (key/value, public preview,
-capped at 20), which land in ``system.query.history`` rather than
-``system.billing.usage``, so attributing warehouse spend means querying query history
-rather than the billing tables.
+Cost attribution goes through ``query_tags`` (key/value, public preview, capped at 20),
+which land in ``system.query.history`` rather than ``system.billing.usage``, so
+attributing warehouse spend means querying query history rather than the billing
+tables.
 """
 
 import datetime
@@ -32,7 +31,7 @@ import decimal
 
 from ...context import JobHandle, JobState, JobStatus
 from ...exceptions import SparkConfigError, SparkException
-from .. import SparkBackend
+from .. import StatementBackend
 from .client import DatabricksClient
 
 #: Databricks recommends against reusing a caller's own auth headers on external-link
@@ -42,6 +41,8 @@ EXTERNAL_LINK_TIMEOUT_SECONDS = 60
 #: The API accepts at most 20 query tags and silently truncates the rest, so truncate
 #: deliberately rather than let the API decide which ones survive.
 MAX_QUERY_TAGS = 20
+
+MAX_DECIMAL_PRECISION = 38
 
 #: databricks-sdk's ColumnInfoTypeName values that map onto a plain pyarrow type. DECIMAL
 #: is handled separately because it needs precision/scale, and anything not listed here
@@ -65,7 +66,7 @@ _ARROW_TYPE_NAMES = (
 )
 
 
-class DatabricksSqlBackend(SparkBackend):
+class DatabricksSqlBackend(StatementBackend):
     """Run one SQL statement against a Databricks SQL warehouse.
 
     Gets the shared wait loop, cancellation, and error classification in
@@ -127,7 +128,6 @@ class DatabricksSqlBackend(SparkBackend):
             backend=self.name,
             job_id=response.statement_id,
             ui_url=self.client.warehouse_url(warehouse_id),
-            extra={"warehouse_id": warehouse_id},
         )
 
     def poll(self, handle):
@@ -137,11 +137,6 @@ class DatabricksSqlBackend(SparkBackend):
 
     def cancel(self, handle):
         self._service().cancel_execution(handle.job_id)
-
-    def fetch_logs(self, handle, stream="stdout"):
-        response = self._responses.get(handle.job_id)
-        error = response.status.error if response and response.status else None
-        return error.message if error else None
 
     def read_output(self, handle, output_format):
         from ...output import from_arrow_table
@@ -181,7 +176,6 @@ class DatabricksSqlBackend(SparkBackend):
                 error.error_code.value if error and error.error_code else None
             ),
             ui_url=handle.ui_url if handle else None,
-            raw={"statement_id": response.statement_id, "state": str(status.state)},
         )
 
     def _collect_arrow(self, statement_id, response):
@@ -327,16 +321,36 @@ def _sql_type_and_value(value):
     if isinstance(value, float):
         return "DOUBLE", repr(value)
     if isinstance(value, decimal.Decimal):
-        _, digits, exponent = value.as_tuple()
-        scale = max(-exponent, 0)
-        precision = max(len(digits), scale + 1)
-        return "DECIMAL(%d,%d)" % (precision, scale), str(value)
+        return _decimal_type_and_value(value)
     if isinstance(value, datetime.datetime):
-        # datetime is a date subclass, so this has to be checked before DATE.
-        return "TIMESTAMP", value.strftime("%Y-%m-%d %H:%M:%S.%f")
+        # datetime is a date subclass, so this has to be checked before DATE. An
+        # aware value keeps its offset so the warehouse reads the right instant; a
+        # naive one is read in the session time zone.
+        return "TIMESTAMP", value.isoformat(sep=" ", timespec="microseconds")
     if isinstance(value, datetime.date):
         return "DATE", value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise SparkConfigError(
+            "Binary query parameters are not supported by the Statement Execution API. "
+            "Pass value.hex() and use unhex(:name) in the statement."
+        )
     return "STRING", str(value)
+
+
+def _decimal_type_and_value(value):
+    if not value.is_finite():
+        raise SparkConfigError(
+            "Cannot bind %s as a DECIMAL parameter; SQL decimals are finite." % value
+        )
+    _, digits, exponent = value.as_tuple()
+    scale = max(-exponent, 0)
+    precision = max(len(digits) + max(exponent, 0), scale + 1)
+    if precision > MAX_DECIMAL_PRECISION:
+        raise SparkConfigError(
+            "Cannot bind %s as a DECIMAL parameter: it needs precision %d, and "
+            "Databricks allows at most %d." % (value, precision, MAX_DECIMAL_PRECISION)
+        )
+    return "DECIMAL(%d,%d)" % (precision, scale), format(value, "f")
 
 
 def _query_tags(tags):

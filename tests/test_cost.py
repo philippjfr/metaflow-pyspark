@@ -1,10 +1,9 @@
-from metaflow_extensions.spark.plugins.context import SparkJobContext
+from metaflow_extensions.spark.plugins.context import TaskContext
 from metaflow_extensions.spark.plugins.cost import MAX_TAG_LENGTH, build_tags, sanitize
 
 
 def make_ctx(**kwargs):
     base = dict(
-        flow=None,
         step_name="features",
         pathspec="RetailFlow/42/features/7",
         flow_name="RetailFlow",
@@ -12,11 +11,10 @@ def make_ctx(**kwargs):
         task_id="7",
         attempt=1,
         user="philipp",
-        config={},
         tags={},
     )
     base.update(kwargs)
-    return SparkJobContext(**base)
+    return TaskContext(**base)
 
 
 def test_tags_carry_the_whole_pathspec():

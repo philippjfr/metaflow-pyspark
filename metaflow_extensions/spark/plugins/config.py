@@ -19,6 +19,9 @@ from .exceptions import SparkConfigError
 
 DEFAULT_TIMEOUT_MINUTES = 60
 
+#: Keys that must never be written into an artifact.
+SECRET_KEYS = ("token", "client_secret")
+
 
 def _deep_merge(base, override):
     """Recursively merge `override` into `base`, returning a new dict."""
@@ -84,22 +87,24 @@ def _env_config():
     return {"databricks": databricks} if databricks else {}
 
 
-def resolve_config(flow, config_attr, overrides):
-    """Build the effective config dict.
+def flow_config(flow, config_attr):
+    """The config layer supplied by the flow.
 
     `config_attr` is either a dict/JSON string used directly, or the name of a flow
     attribute holding one. A missing named attribute is not an error: the environment
     and explicit arguments may configure everything.
     """
-    from_flow = {}
     if isinstance(config_attr, str):
         raw = getattr(flow, config_attr, None)
-        if raw is not None:
-            from_flow = _coerce(raw, "the '%s' artifact" % config_attr)
-    elif config_attr is not None:
-        from_flow = _coerce(config_attr, "the config argument")
+        return (
+            _coerce(raw, "the '%s' artifact" % config_attr) if raw is not None else {}
+        )
+    return _coerce(config_attr, "the config argument")
 
-    config = _deep_merge(_env_config(), from_flow)
+
+def resolve_config(flow, config_attr, overrides):
+    """Build the effective config dict from every layer."""
+    config = _deep_merge(_env_config(), flow_config(flow, config_attr))
     config = _deep_merge(config, overrides or {})
 
     config.setdefault("timeout", DEFAULT_TIMEOUT_MINUTES)

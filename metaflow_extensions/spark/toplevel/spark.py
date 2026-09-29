@@ -7,11 +7,12 @@ may import pyspark, boto3, or the Databricks SDK.
 
 from ..plugins.catalog.unity import UnityCatalogTable, read_table
 from ..plugins.exceptions import (
+    ControlPlaneError,
+    QueryCancelled,
+    QueryFailed,
+    QueryTimeout,
     SparkConfigError,
     SparkException,
-    SparkJobCancelled,
-    SparkJobFailed,
-    SparkJobTimeout,
     UnityCatalogError,
 )
 
@@ -20,8 +21,9 @@ __all__ = [
     "read_table",
     "SparkException",
     "SparkConfigError",
-    "SparkJobFailed",
-    "SparkJobCancelled",
-    "SparkJobTimeout",
+    "QueryFailed",
+    "QueryCancelled",
+    "QueryTimeout",
+    "ControlPlaneError",
     "UnityCatalogError",
 ]

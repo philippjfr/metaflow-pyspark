@@ -28,13 +28,15 @@ reader for that case, which does apply deletion vectors correctly. Covers AWS an
 SAS credentials (see ``_read_via_duckdb``'s docstring for exactly how well-verified each
 is); GCP has no DuckDB secret shape for the OAuth bearer token UC vends. Install
 ``duckdb`` to get the fallback; without it, or on GCP, a table with deletion vectors fails
-with an explanation rather than a raw stack trace, pointing at ``to_spark()``.
+with an explanation rather than a raw stack trace, pointing at ``query()`` on a SQL
+warehouse.
 """
 
 import os
 import sys
 import time
 
+from ..config import SECRET_KEYS, _deep_merge, flow_config, resolve_config
 from ..exceptions import SparkBackendUnavailable, UnityCatalogError
 
 UC_API = "/api/2.1/unity-catalog"
@@ -81,9 +83,18 @@ def _azure_storage_account(storage_location):
 class UnityCatalogTable:
     """A pinned reference to a Unity Catalog table.
 
-    Picklable, so it round-trips as a Metaflow artifact. Live clients and vended
-    credentials are deliberately excluded from the pickled state: credentials expire,
-    and a stale one in an artifact would be both useless and a leak.
+    Picklable, so it round-trips as a Metaflow artifact. Live clients, vended
+    credentials, and any ``token`` or ``client_secret`` in ``config`` are excluded from
+    the pickled state, so a step that reads the artifact authenticates from its own
+    environment.
+
+    Connection settings resolve like ``query()``'s: ``DATABRICKS_*`` /
+    ``METAFLOW_DATABRICKS_*`` environment variables, then the ``databricks`` section of
+    ``flow.spark_config`` when ``flow`` is given, then ``config``.
+
+    ``pin=True`` records the current Delta version, or warns and leaves the reference
+    unpinned if it cannot be read (no ``deltalake``, or vending refused).
+    ``pin="required"`` raises instead, and ``pin=False`` skips pinning.
     """
 
     def __init__(
@@ -94,10 +105,15 @@ class UnityCatalogTable:
         client=None,
         pin=True,
         config=None,
+        flow=None,
     ):
         if name.count(".") != 2:
             raise UnityCatalogError(
                 "Unity Catalog tables are named catalog.schema.table, got %r." % name
+            )
+        if pin not in (True, False, "required"):
+            raise UnityCatalogError(
+                "pin must be True, False, or 'required', got %r." % (pin,)
             )
         self.full_name = name
         self.catalog, self.schema, self.table = name.split(".")
@@ -108,8 +124,12 @@ class UnityCatalogTable:
         self.table_type = None
         self.data_source_format = None
 
+        self._pin = pin
         self._client = client
-        self._config = config or {}
+        # The environment layer is applied when the client is built, not captured
+        # here, so a reading step uses its own environment.
+        from_flow = flow_config(flow, "spark_config").get("databricks") or {}
+        self._config = _deep_merge(from_flow, config or {})
         self._credentials = None
         self._credentials_expiry = 0
 
@@ -124,6 +144,9 @@ class UnityCatalogTable:
         state = self.__dict__.copy()
         for key in ("_client", "_credentials", "_credentials_expiry"):
             state.pop(key, None)
+        state["_config"] = {
+            k: v for k, v in self._config.items() if k not in SECRET_KEYS
+        }
         return state
 
     def __setstate__(self, state):
@@ -132,6 +155,7 @@ class UnityCatalogTable:
         self._credentials = None
         self._credentials_expiry = 0
         self._config = getattr(self, "_config", {}) or {}
+        self._pin = getattr(self, "_pin", True)
 
     def __repr__(self):
         pin = ""
@@ -147,7 +171,8 @@ class UnityCatalogTable:
         if self._client is None:
             from ..backends.databricks.client import DatabricksClient
 
-            self._client = DatabricksClient(self._config)
+            config = resolve_config(None, None, {"databricks": self._config})
+            self._client = DatabricksClient(config["databricks"])
         return self._client
 
     @property
@@ -171,12 +196,24 @@ class UnityCatalogTable:
     def _current_version(self):
         """Read the table's current Delta version, without needing a cluster."""
         if self.data_source_format not in (None, "DELTA", "UNITY_CATALOG"):
-            # Version pinning is a Delta feature. Say so instead of failing obscurely.
+            if self._pin == "required":
+                raise UnityCatalogError(
+                    "%s is %s, not Delta, so it cannot be pinned to a version."
+                    % (self.full_name, self.data_source_format)
+                )
             return None
         try:
             delta = self._delta_table()
             return delta.version() if delta is not None else None
         except Exception as exc:
+            if self._pin == "required":
+                raise UnityCatalogError(
+                    "Could not pin %s to its current Delta version: %s\n"
+                    "Pinning reads the Delta log through credential vending, which "
+                    "needs deltalake installed and EXTERNAL USE SCHEMA granted. Or pin "
+                    'explicitly with version=N, using N from query("DESCRIBE HISTORY '
+                    '%s").' % (self.full_name, exc, self.full_name)
+                ) from exc
             # Silent divergence is the outcome to avoid: an unpinned reference reads
             # whatever the table looks like at call time, and that has to be visible,
             # not a `version=None` nobody notices until a reproduce run comes up empty.
@@ -185,12 +222,12 @@ class UnityCatalogTable:
             # silently swallows warnings from user code too. Write to stderr directly.
             print(
                 "[UnityCatalogTable] %s was assigned without a pinned Delta version: %s\n"
-                "to_spark() and to_arrow() will read the table's current state on every "
-                "call instead of a fixed snapshot. This usually means credential "
+                "Reads through this reference will see the table's current state on "
+                "every call instead of a fixed snapshot. This usually means credential "
                 "vending is unavailable (no EXTERNAL USE SCHEMA, or deltalake is not "
-                "installed); reading through to_spark() still works. Pin explicitly "
-                "once you know the version, e.g. UnityCatalogTable(%r, version=N), "
-                "using N from `DESCRIBE HISTORY %s` run through Spark."
+                "installed). Pin explicitly with UnityCatalogTable(%r, version=N), "
+                "using N from query(\"DESCRIBE HISTORY %s\"), or pass pin='required' "
+                "to fail instead of warning."
                 % (self.full_name, exc, self.full_name, self.full_name),
                 file=sys.stderr,
             )
@@ -213,7 +250,23 @@ class UnityCatalogTable:
     def latest(self):
         """Return a new reference pinned to the table's current version."""
         return UnityCatalogTable(
-            self.full_name, client=self._client, config=self._config
+            self.full_name,
+            client=self._client,
+            config=self._config,
+            pin=self._pin or True,
+        )
+
+    def _fallback_hint(self):
+        """How to read this reference when credential vending cannot."""
+        source = self.full_name
+        if self.version is not None:
+            source += " VERSION AS OF %d" % self.version
+        elif self.timestamp is not None:
+            source += " TIMESTAMP AS OF '%s'" % self.timestamp
+        return (
+            "Read it through a SQL warehouse instead, which applies the table's "
+            'grants, views, and protocol, e.g. query("SELECT * FROM %s"), or through '
+            "an existing Spark session with to_spark()." % source
         )
 
     # ------------------------------------------------------------------
@@ -244,9 +297,8 @@ class UnityCatalogTable:
             raise UnityCatalogError(
                 "Unity Catalog refused to vend credentials for %s: %s\n"
                 "Credential vending requires EXTERNAL USE SCHEMA on the schema (or "
-                "equivalent) in addition to SELECT on the table. If your workspace does "
-                "not allow it, read through Spark with to_spark() instead."
-                % (self.full_name, exc)
+                "equivalent) in addition to SELECT on the table. %s"
+                % (self.full_name, exc, self._fallback_hint())
             ) from exc
 
         expiry_ms = response.get("expiration_time")
@@ -291,8 +343,7 @@ class UnityCatalogTable:
 
         raise UnityCatalogError(
             "Unity Catalog returned credentials in a form this version does not "
-            "understand: %s. Read through Spark with to_spark() instead."
-            % ", ".join(sorted(creds))
+            "understand: %s. %s" % (", ".join(sorted(creds)), self._fallback_hint())
         )
 
     def _resolve_region(self, aws_credentials):
@@ -333,9 +384,9 @@ class UnityCatalogTable:
             )
         if not self.storage_location:
             raise UnityCatalogError(
-                "%s has no storage location, so it cannot be read without Spark. "
-                "Managed views and foreign tables have to go through to_spark()."
-                % self.full_name
+                "%s has no storage location, so credential vending cannot read it. "
+                "Views and foreign tables need the query engine. %s"
+                % (self.full_name, self._fallback_hint())
             )
         kwargs = {"storage_options": self.storage_options()}
         if self.version is not None:
@@ -379,10 +430,10 @@ class UnityCatalogTable:
         work, so the log line itself answers "why didn't it fall back to DuckDB"
         without anyone having to go digging through a swallowed exception chain.
         """
-        message = (
-            "%s cannot be read without a cluster: %s\n"
-            "Read through Spark instead with to_spark(), which applies whatever the "
-            "table's protocol requires as part of its own scan." % (self.full_name, exc)
+        message = "%s cannot be read through credential vending: %s\n%s" % (
+            self.full_name,
+            exc,
+            self._fallback_hint(),
         )
         if duckdb_reason:
             message += "\n(DuckDB fallback not used: %s)" % duckdb_reason

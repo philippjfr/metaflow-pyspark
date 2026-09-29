@@ -21,7 +21,7 @@ def sanitize(value):
 
 
 def build_tags(ctx, extra=None):
-    """Build the tag dict for a submitted statement or job."""
+    """Build the tag dict for a submitted statement."""
     tags = {
         TAG_PREFIX + "flow": ctx.flow_name,
         TAG_PREFIX + "run_id": ctx.run_id,

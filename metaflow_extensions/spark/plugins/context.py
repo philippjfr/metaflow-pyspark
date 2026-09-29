@@ -6,8 +6,8 @@ backend dependencies installed.
 """
 
 import sys
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional
 
 
 class JobState:
@@ -30,7 +30,6 @@ class JobStatus:
     message: Optional[str] = None
     error_class: Optional[str] = None
     ui_url: Optional[str] = None
-    raw: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def terminal(self):
@@ -43,27 +42,17 @@ class JobStatus:
 
 @dataclass
 class JobHandle:
-    """An opaque, picklable reference to a submitted statement or job."""
+    """A reference to a submitted statement."""
 
     backend: str
     job_id: str
     ui_url: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self):
-        return {
-            "backend": self.backend,
-            "job_id": self.job_id,
-            "ui_url": self.ui_url,
-            "extra": self.extra,
-        }
 
 
 @dataclass
-class SparkJobContext:
-    """Everything a backend needs in order to run one step's remote work."""
+class TaskContext:
+    """The Metaflow task a statement runs for, used for tags and logging."""
 
-    flow: Any
     step_name: str
     pathspec: str
     flow_name: str
@@ -71,7 +60,6 @@ class SparkJobContext:
     task_id: str
     attempt: int
     user: Optional[str]
-    config: Dict[str, Any]
     tags: Dict[str, str]
     timeout_minutes: Optional[int] = None
     logger: Optional[Callable] = None
@@ -84,7 +72,7 @@ class SparkJobContext:
 
 
 def log(msg, job_id=None, stream="stdout"):
-    prefix = "spark"
+    prefix = "query"
     if job_id:
         prefix += "[%s]" % job_id
     print("%s: %s" % (prefix, msg), file=getattr(sys, stream), flush=True)

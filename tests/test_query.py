@@ -14,7 +14,7 @@ import metaflow_extensions.spark.plugins.backends as backends_mod
 import metaflow_extensions.spark.plugins.backends.databricks.sql as sql_mod
 from metaflow_extensions.spark.plugins.exceptions import (
     SparkConfigError,
-    SparkJobFailed,
+    QueryFailed,
 )
 from metaflow_extensions.spark.plugins.warehouse import query
 
@@ -119,17 +119,21 @@ def test_no_warehouse_anywhere_explains_how_to_set_one(service):
     assert service.executed == []
 
 
-@pytest.mark.parametrize("output_format", ["table", "url", "spark"])
-def test_reference_formats_are_rejected_up_front(service, output_format):
-    with pytest.raises(SparkConfigError, match="not meaningful"):
-        query("SELECT 1", warehouse_id="wh-1", output_format=output_format)
+def test_unknown_formats_are_rejected_up_front(service):
+    with pytest.raises(SparkConfigError, match="not supported"):
+        query("SELECT 1", warehouse_id="wh-1", output_format="csv")
     assert service.executed == []
 
 
 def test_a_failed_statement_raises_job_failed(service):
     service.states = [StatementState.FAILED]
-    with pytest.raises(SparkJobFailed):
+    with pytest.raises(QueryFailed):
         query("SELECT nope", warehouse_id="wh-1")
+
+
+def test_a_failed_statement_returns_none_without_crash_on_failure(service):
+    service.states = [StatementState.FAILED]
+    assert query("SELECT nope", warehouse_id="wh-1", crash_on_failure=False) is None
 
 
 def test_an_interrupt_cancels_the_statement(service):

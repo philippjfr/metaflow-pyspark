@@ -24,7 +24,11 @@ self.orders = UnityCatalogTable("main.retail.orders")   # pins the current Delta
 
 The artifact is a reference, not a copy. Assignment records the table's current Delta version, and every read through the reference uses that version, so a re-run reads the same bytes even after the table has moved on. `at_version()`, `at_timestamp()`, and `latest()` return re-pinned references, and `history()` lists the versions.
 
-`to_arrow()`, `to_pandas()`, `to_polars()`, and `to_duckdb()` ask Unity Catalog to vend temporary, table-scoped credentials and read the Delta files directly with `deltalake`. UC checks the grants and issues the credentials, and the credentials are never pickled into the artifact. Vending needs `EXTERNAL USE SCHEMA` in addition to `SELECT`, and the error says so when it is missing. Tables with deletion vectors, which `deltalake` cannot read, fall back to DuckDB's Delta reader on AWS and Azure. `to_spark(session)` reads the pinned version through a Spark session you already have.
+Reading the current version goes through credential vending. The step that creates the reference therefore needs `deltalake` and the `EXTERNAL USE SCHEMA` grant. Without them the reference is left unpinned with a warning on stderr. Pass `pin="required"` to raise instead, or `version=N` to pin explicitly.
+
+`to_arrow()`, `to_pandas()`, `to_polars()`, and `to_duckdb()` ask Unity Catalog to vend temporary, table-scoped credentials and read the Delta files directly with `deltalake`. UC checks the grants and issues the credentials. Vending needs `EXTERNAL USE SCHEMA` in addition to `SELECT`, and the error says so when it is missing, pointing at `query()` as the alternative. Tables with deletion vectors, which `deltalake` cannot read, fall back to DuckDB's Delta reader on AWS and Azure. `to_spark(session)` reads the pinned version through a Spark session you already have.
+
+Connection settings resolve the same way as for `query()` below, with `config={...}` as the explicit layer and `flow=self` adding the flow's `spark_config`. Neither vended credentials nor a `token` or `client_secret` from `config` is pickled into the artifact; a step that reads the reference authenticates from its own environment.
 
 ### SQL warehouse statements
 
@@ -41,7 +45,7 @@ self.daily = query(
 
 `query()` submits one statement to a Databricks SQL warehouse and returns the result as `pandas`, `arrow`, `polars`, or `none`. `params` bind as named, typed parameters through `:name` markers and are never formatted into the SQL text. Unlike credential vending, a statement goes through the query engine, so views, row filters, and column masks apply. An arbitrary statement is not pinned the way a `UnityCatalogTable` is; add `VERSION AS OF` yourself when that matters.
 
-The warehouse is `warehouse_id=`, else `warehouse_id` in the `databricks` section of a flow-level config artifact (`query(..., flow=self)` reads `self.spark_config`), else `METAFLOW_DATABRICKS_WAREHOUSE_ID` or `DATABRICKS_WAREHOUSE_ID`. Polling shares one wait loop that cancels the statement on interrupt or timeout and reports a control-plane outage as `SparkControlPlaneError` rather than as a failed statement. Each statement carries the flow, run, step, task, and user as `query_tags`, which land in `system.query.history` (needs `databricks-sdk>=0.86`; older SDKs run without the tags).
+The warehouse is `warehouse_id=`, else `warehouse_id` in the `databricks` section of a flow-level config artifact (`query(..., flow=self)` reads `self.spark_config`), else `METAFLOW_DATABRICKS_WAREHOUSE_ID` or `DATABRICKS_WAREHOUSE_ID`. Polling shares one wait loop that cancels the statement on interrupt or timeout and reports a control-plane outage as `ControlPlaneError` rather than as a failed statement (`QueryFailed`). Each statement carries the flow, run, step, task, and user as `query_tags`, which land in `system.query.history` (needs `databricks-sdk>=0.86`; older SDKs run without the tags).
 
 ### Demos
 

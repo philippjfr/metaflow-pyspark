@@ -91,6 +91,28 @@ def test_unpinned_reference_is_not_pinned():
     assert not table().pinned
 
 
+def test_a_failed_pin_warns_and_leaves_the_reference_unpinned(capsys):
+    ref = table(client=FakeClient(credentials=None), pin=True)
+    assert not ref.pinned
+    assert "without a pinned Delta version" in capsys.readouterr().err
+
+
+def test_a_required_pin_raises_instead_of_warning():
+    with pytest.raises(UnityCatalogError, match="Could not pin"):
+        table(client=FakeClient(credentials=None), pin="required")
+
+
+def test_a_required_pin_rejects_non_delta_tables():
+    client = FakeClient(info=dict(TABLE_INFO, data_source_format="PARQUET"))
+    with pytest.raises(UnityCatalogError, match="not Delta"):
+        table(client=client, pin="required")
+
+
+def test_pin_must_be_a_known_mode():
+    with pytest.raises(UnityCatalogError, match="pin must be"):
+        table(pin="yes")
+
+
 # ----------------------------------------------------------------------
 def test_pickling_drops_the_client_and_credentials():
     ref = table(version=5)
@@ -105,6 +127,63 @@ def test_pickling_drops_the_client_and_credentials():
     assert restored.version == 5
     assert restored._client is None
     assert restored._credentials is None
+
+
+def test_pickling_drops_configured_secrets_but_keeps_the_rest():
+    ref = table(
+        config={"host": "https://h", "token": "dapi-secret", "client_secret": "s"}
+    )
+    blob = pickle.dumps(ref)
+    assert b"dapi-secret" not in blob
+    assert pickle.loads(blob)._config == {"host": "https://h"}
+    # The live object still has what it was given.
+    assert ref._config["token"] == "dapi-secret"
+
+
+@pytest.fixture
+def recorded_client_config(monkeypatch):
+    """Capture the config the reference hands to DatabricksClient."""
+    import metaflow_extensions.spark.plugins.backends.databricks.client as client_mod
+
+    for env in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_WAREHOUSE_ID"):
+        monkeypatch.delenv(env, raising=False)
+        monkeypatch.delenv("METAFLOW_" + env, raising=False)
+    seen = []
+
+    class RecordingClient(FakeClient):
+        def __init__(self, config=None):
+            super().__init__()
+            seen.append(config)
+
+    monkeypatch.setattr(client_mod, "DatabricksClient", RecordingClient)
+    return seen
+
+
+def test_connection_settings_follow_the_query_precedence(
+    recorded_client_config, monkeypatch
+):
+    monkeypatch.setenv("METAFLOW_DATABRICKS_HOST", "https://env")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "env-token")
+
+    class Flow:
+        spark_config = {"databricks": {"host": "https://flow", "profile": "flow"}}
+
+    UnityCatalogTable(
+        "main.retail.orders", pin=False, flow=Flow(), config={"profile": "explicit"}
+    )
+    assert recorded_client_config == [
+        {"host": "https://flow", "token": "env-token", "profile": "explicit"}
+    ]
+
+
+def test_an_unpickled_reference_authenticates_from_the_reading_environment(
+    recorded_client_config, monkeypatch
+):
+    ref = UnityCatalogTable("main.retail.orders", pin=False, config={"token": "writer"})
+    restored = pickle.loads(pickle.dumps(ref))
+    monkeypatch.setenv("METAFLOW_DATABRICKS_TOKEN", "reader")
+    restored.schema_fields()
+    assert recorded_client_config[-1] == {"token": "reader"}
 
 
 def test_pickled_reference_still_knows_its_storage_location():
@@ -157,7 +236,7 @@ def test_refused_vending_points_at_the_spark_path():
     with pytest.raises(UnityCatalogError) as exc:
         ref.storage_options()
     assert "EXTERNAL USE SCHEMA" in str(exc.value)
-    assert "to_spark()" in str(exc.value)
+    assert "query(" in str(exc.value)
 
 
 def test_azure_sas_credentials_are_translated():
@@ -333,7 +412,7 @@ def test_deletion_vectors_still_get_an_explanation_when_no_secret_can_be_built(
     with pytest.raises(UnityCatalogError) as exc:
         ref.to_arrow()
     assert "deletionVectors" in str(exc.value)
-    assert "to_spark()" in str(exc.value)
+    assert "query(" in str(exc.value)
     # The point of this fix: the log line itself says why, not just that it failed.
     assert "DuckDB fallback not used" in str(exc.value)
     assert "gcp_oauth_token" in str(exc.value)
@@ -577,7 +656,7 @@ def test_other_protocol_errors_get_the_generic_explanation(monkeypatch):
     with pytest.raises(UnityCatalogError) as exc:
         ref.to_arrow()
     assert "some other unsupported reader feature" in str(exc.value)
-    assert "to_spark()" in str(exc.value)
+    assert "query(" in str(exc.value)
 
 
 def test_unrelated_exceptions_are_not_swallowed_by_the_protocol_translator():

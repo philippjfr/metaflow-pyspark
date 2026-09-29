@@ -7,7 +7,7 @@ backend with no special-casing.
 """
 
 import decimal
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 import pyarrow as pa
 import pytest
@@ -31,7 +31,7 @@ from metaflow_extensions.spark.plugins.backends.databricks.sql import (
 from metaflow_extensions.spark.plugins.context import (
     JobHandle,
     JobState,
-    SparkJobContext,
+    TaskContext,
 )
 from metaflow_extensions.spark.plugins.exceptions import (
     SparkConfigError,
@@ -40,8 +40,7 @@ from metaflow_extensions.spark.plugins.exceptions import (
 
 
 def make_ctx(tags=None):
-    return SparkJobContext(
-        flow=None,
+    return TaskContext(
         step_name="analyze",
         pathspec="RetailFlow/42/analyze/7",
         flow_name="RetailFlow",
@@ -49,7 +48,6 @@ def make_ctx(tags=None):
         task_id="7",
         attempt=0,
         user="tester",
-        config={},
         tags=tags or {},
     )
 
@@ -165,10 +163,42 @@ def test_date_and_datetime_are_distinguished():
     assert value.startswith("2026-01-01 12:30:00")
 
 
+def test_an_aware_datetime_keeps_its_offset():
+    plus_five = timezone(timedelta(hours=5))
+    value = datetime(2026, 1, 1, 12, 0, tzinfo=plus_five)
+    assert _sql_type_and_value(value) == (
+        "TIMESTAMP",
+        "2026-01-01 12:00:00.000000+05:00",
+    )
+
+
 def test_decimal_carries_precision_and_scale():
     sql_type, value = _sql_type_and_value(decimal.Decimal("12.50"))
     assert sql_type == "DECIMAL(4,2)"
     assert value == "12.50"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1E+3", ("DECIMAL(4,0)", "1000")),
+        ("0.05", ("DECIMAL(3,2)", "0.05")),
+        ("-1.5E-3", ("DECIMAL(5,4)", "-0.0015")),
+    ],
+)
+def test_decimal_exponents_bind_in_fixed_notation(value, expected):
+    assert _sql_type_and_value(decimal.Decimal(value)) == expected
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "1E+40"])
+def test_decimals_sql_cannot_hold_are_rejected(value):
+    with pytest.raises(SparkConfigError, match="DECIMAL"):
+        _sql_type_and_value(decimal.Decimal(value))
+
+
+def test_bytes_are_rejected_with_the_hex_workaround():
+    with pytest.raises(SparkConfigError, match="unhex"):
+        _sql_type_and_value(b"ab")
 
 
 def test_none_binds_as_null():
