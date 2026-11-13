@@ -256,6 +256,37 @@ def test_lineage_tags_carry_the_pathspec():
     }
 
 
+def test_stamp_lineage_sets_the_tags_through_query(monkeypatch):
+    from metaflow_extensions.spark.plugins import warehouse
+
+    class Ctx:
+        pathspec = "RetailFlow/42/features/7"
+        flow_name = "RetailFlow"
+        run_id = "42"
+
+    calls = []
+    monkeypatch.setattr(
+        warehouse,
+        "query",
+        lambda statement, **kwargs: calls.append((statement, kwargs)),
+    )
+    table().stamp_lineage(Ctx(), warehouse_id="wh-1")
+    assert calls == [
+        (
+            "ALTER TABLE `main`.`retail`.`orders` SET TAGS ("
+            "'metaflow_pathspec' = 'RetailFlow/42/features/7', "
+            "'metaflow_flow' = 'RetailFlow', 'metaflow_run_id' = '42')",
+            {"warehouse_id": "wh-1", "output_format": "none"},
+        )
+    ]
+
+
+def test_lineage_tag_values_are_escaped():
+    from metaflow_extensions.spark.plugins.catalog.unity import _sql_literal
+
+    assert _sql_literal("it's") == "it\\'s"
+
+
 # ----------------------------------------------------------------------
 # reads deltalake's Python reader cannot do at all, cluster or not
 # ----------------------------------------------------------------------
@@ -304,6 +335,38 @@ def _table_over(path, credentials=None):
     return table(client=FakeClient(info=info, credentials=credentials))
 
 
+def test_write_commits_through_read_write_credentials_and_pins_the_result(tmp_path):
+    import pandas as pd
+    from deltalake import write_deltalake
+
+    path = str(tmp_path / "daily")
+    write_deltalake(path, pd.DataFrame({"id": [1, 2]}))
+    ref = _table_over(path, credentials=AWS_CREDS)
+
+    written = ref.write(pd.DataFrame({"id": [3]}))
+
+    assert written.version == 1
+    assert sorted(written.to_pandas()["id"]) == [1, 2, 3]
+    operations = [body["operation"] for _, _, body in ref.client.calls if body]
+    assert "READ_WRITE" in operations
+
+
+def test_read_credentials_are_not_reused_for_a_write():
+    client = FakeClient(credentials=AWS_CREDS)
+    ref = table(client=client)
+    ref.credentials()
+    ref.credentials(operation="READ_WRITE")
+    operations = [body["operation"] for _, _, body in client.calls if body]
+    assert operations == ["READ", "READ_WRITE"]
+
+
+def test_managed_tables_refuse_vended_writes():
+    info = dict(TABLE_INFO, table_type="MANAGED")
+    ref = table(client=FakeClient(info=info, credentials=AWS_CREDS))
+    with pytest.raises(UnityCatalogError, match="managed table"):
+        ref.write(None)
+
+
 def test_deletion_vectors_fall_back_to_duckdbs_own_reader(tmp_path):
     """DuckDB's delta_scan applies deletion vectors where delta-rs's reader does not.
 
@@ -317,6 +380,19 @@ def test_deletion_vectors_fall_back_to_duckdbs_own_reader(tmp_path):
 
     result = ref.to_arrow()
     assert sorted(result.column("id").to_pylist()) == [0, 1, 3, 4]  # id 2 was deleted
+
+
+def test_deletion_vector_fallback_honours_the_pin(tmp_path):
+    """The fallback once read the latest version whatever the pin said."""
+    path = _deletion_vector_table(tmp_path)
+    info = dict(TABLE_INFO, storage_location=path)
+    client = FakeClient(info=info, credentials=AWS_CREDS)
+    pinned = UnityCatalogTable("main.retail.orders", version=0, client=client)
+    latest = UnityCatalogTable("main.retail.orders", client=client)
+
+    assert latest.version == 1
+    assert sorted(pinned.to_arrow().column("id").to_pylist()) == [0, 1, 2, 3, 4]
+    assert sorted(latest.to_arrow().column("id").to_pylist()) == [0, 1, 3, 4]
 
 
 def test_deletion_vectors_are_handled_from_every_materializing_read(tmp_path):
@@ -572,6 +648,9 @@ def test_other_protocol_errors_get_the_generic_explanation(monkeypatch):
     ref = table()
 
     class ExplodingDelta:
+        def version(self):
+            return 0
+
         def to_pyarrow_dataset(self):
             raise FakeProtocolError("some other unsupported reader feature")
 
@@ -587,6 +666,9 @@ def test_unrelated_exceptions_are_not_swallowed_by_the_protocol_translator():
     ref = table()
 
     class ExplodingDelta:
+        def version(self):
+            return 0
+
         def to_pyarrow_dataset(self):
             raise RuntimeError("network blip, nothing to do with the protocol")
 

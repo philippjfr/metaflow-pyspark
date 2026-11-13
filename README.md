@@ -87,8 +87,9 @@ of its package: a job can span more than one file, and `include=[...]` adds anyt
 
 `output_format` decides what lands in the artifact: `pandas`, `arrow`, `polars`, `table`, `url`,
 `spark`, or `none`. The materializing formats copy the result into the task, which is convenient and
-wrong past a certain size. `table` and `url` pass a reference to the next step instead. A result
-over 1GB gets a warning pointing at those.
+wrong past a certain size. `table` and `url` pass a reference to the next step instead: with
+`output_table=...`, `table` gives the next step a `UnityCatalogTable` pinned to the version the job
+wrote. A result over 1GB gets a warning pointing at those.
 
 ## Unity Catalog tables as artifacts
 
@@ -105,6 +106,11 @@ large tables and joins. `to_arrow()`, `to_pandas()`, `to_polars()`, and `to_duck
 Catalog to vend temporary, table-scoped credentials and read the Delta files directly, with no cluster
 involved at all. Governance is intact either way: UC issues the credentials and enforces the
 grants. Vending needs `EXTERNAL USE SCHEMA` in addition to `SELECT`, and says so when it is missing.
+
+Writes go through Spark (`saveAsTable`, or a job's `output_table`), a warehouse statement, or, for
+external tables, `write(data)`, which commits through vended `READ_WRITE` credentials and returns
+the newly pinned reference. `stamp_lineage(current)` tags a written table with the Metaflow task
+that wrote it. [`demos/04_writing`](demos/04_writing) compares the four.
 
 ## SQL warehouses: a statement, no cluster, no session
 
@@ -131,7 +137,7 @@ Target resolution: an explicit `warehouse_id=` wins, else a live session on the 
 warehouse connection, else the configured default (`warehouse_id` in the `databricks` config section,
 or `METAFLOW_DATABRICKS_WAREHOUSE_ID` / `DATABRICKS_WAREHOUSE_ID`). `output_format` is `pandas`,
 `arrow`, `polars`, or `none`; `table` and `url` are not meaningful for a statement result and are
-rejected up front. See [`demos/03_no_cluster`](demos/03_no_cluster) for this next to credential
+rejected up front. See [`demos/02_reading`](demos/02_reading) for this next to credential
 vending and a Spark session, measured side by side.
 
 ## Cost attribution
@@ -140,7 +146,7 @@ Every submitted job carries `metaflow_flow`, `metaflow_run_id`, `metaflow_step`,
 `metaflow_pathspec`, `metaflow_attempt`, and `metaflow_user` as provider tags, plus anything in
 `@spark(tags=...)`. On Databricks those land in `system.billing.usage`, which turns a monthly total
 into a per-flow, per-run, per-step breakdown. See
-[`demos/06_cost_attribution`](demos/06_cost_attribution).
+[`demos/07_cost_attribution`](demos/07_cost_attribution).
 
 `query()` statements carry the same tags, but as `query_tags` on the statement rather than
 `custom_tags` on compute, since a warehouse is shared, long-lived compute rather than a job's own
@@ -177,7 +183,8 @@ So the same flow file moves between environments without editing the flow, which
 
 ## Demos
 
-Five demos are built. See [`demos/`](demos) for the set,
+Eight chapters are built, all asking one question of one table so the access paths can be compared
+directly. See [`demos/`](demos) for the set,
 [`plans/databricks-integration.md`](plans/databricks-integration.md) for the customer questions and
 the architecture chosen in response, and [`plans/scope.md`](plans/scope.md) for the phased delivery
 plan.

@@ -1,4 +1,4 @@
-"""Demo 4a: put Metaflow in front of pipelines that already exist.
+"""Chapter 6a: put Metaflow in front of pipelines that already exist.
 
     python orchestrate.py run
 
@@ -12,6 +12,7 @@ resolved to an id at submit time, so a job recreated by a bundle deploy keeps wo
 """
 
 from _env import step_env
+from _orders import ORDERS
 
 from metaflow import (
     FlowSpec,
@@ -29,7 +30,7 @@ from metaflow import (
 #: module constants rather than Parameters. Values that vary per run travel through
 #: `parameters_from`, which reads them off the flow at submit time.
 VALIDATE_NOTEBOOK = "/Repos/data-platform/etl/validate_features"
-FALLBACK_TABLE = "samples.bakehouse.sales_transactions"
+FALLBACK_TABLE = ORDERS
 
 
 class OrchestrateFlow(FlowSpec):
@@ -65,25 +66,31 @@ class OrchestrateFlow(FlowSpec):
         print("enrichment task values: %s" % self.enrichment)
         self.next(self.join)
 
-    @step_env()
+    @step_env("vending")
     @step
     def join(self, inputs):
         self.run_date = inputs.ingest.run_date
         # Task values from a Databricks job come back keyed by task_key, which is how a
         # multi-task job hands its outputs to whatever comes next.
-        self.tables = sorted(
+        names = sorted(
             {
                 value
-                for result in (inputs.ingest.databricks_result, inputs.enrich.enrichment)
+                for result in (
+                    inputs.ingest.databricks_result,
+                    inputs.enrich.enrichment,
+                )
                 for value in (result or {}).values()
                 if isinstance(value, str) and value.count(".") == 2
             }
         )
-        if not self.tables:
+        if not names:
             # A job that does not set task values leaves nothing to fan out over, so fall
             # back to the table the pipelines are known to write.
-            self.tables = [FALLBACK_TABLE]
-        print("tables produced upstream: %s" % ", ".join(self.tables))
+            names = [FALLBACK_TABLE]
+        # Pin what the jobs wrote, so the fan-out, and any re-run of it, reads these
+        # versions even after the jobs run again tomorrow.
+        self.tables = [UnityCatalogTable(name) for name in names]
+        print("tables produced upstream: %s" % ", ".join(map(repr, self.tables)))
         self.next(self.validate)
 
     @step_env()
@@ -103,14 +110,14 @@ class OrchestrateFlow(FlowSpec):
     def profile(self):
         """One branch per upstream table, which is the part Workflows does not do well.
 
-        Reads through credential vending, so the fan-out costs no DBUs however wide it
-        gets. Swap the body for a real training step and the shape does not change.
+        Reads the pinned reference through credential vending, so the fan-out costs no
+        DBUs however wide it gets. Swap the body for a real training step and the shape
+        does not change.
         """
-        self.table_name = self.input
-        table = UnityCatalogTable(self.table_name)
+        table = self.input
         frame = table.to_pandas()
         self.table_stats = {
-            "table": self.table_name,
+            "table": table.full_name,
             "version": table.version,
             "rows": len(frame),
             "columns": list(frame.columns),

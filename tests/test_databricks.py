@@ -12,15 +12,19 @@ from metaflow_extensions.spark.plugins.backends.databricks.compute import (
     SERVERLESS,
     resolve_compute,
 )
+from metaflow_extensions.spark.plugins import remote_driver
 from metaflow_extensions.spark.plugins.backends.databricks.jobs import (
+    DatabricksJobsBackend,
     _DatabricksRunBackend,
+    task_python_file,
 )
 from metaflow_extensions.spark.plugins.backends.databricks.storage import (
     is_cloud_uri,
     is_volume_path,
     normalize_volume,
 )
-from metaflow_extensions.spark.plugins.context import JobState
+from metaflow_extensions.spark.plugins.catalog.unity import UnityCatalogTable
+from metaflow_extensions.spark.plugins.context import JobHandle, JobState
 from metaflow_extensions.spark.plugins.exceptions import SparkConfigError
 
 terminal_state = _DatabricksRunBackend._terminal_state
@@ -145,6 +149,15 @@ def test_normalize_volume_strips_trailing_slashes():
     )
 
 
+def test_driver_on_a_volume_is_submitted_with_the_dbfs_scheme():
+    assert task_python_file("/Volumes/main/m/s/remote_driver.py") == (
+        "dbfs:/Volumes/main/m/s/remote_driver.py"
+    )
+    assert task_python_file("s3://bucket/remote_driver.py") == (
+        "s3://bucket/remote_driver.py"
+    )
+
+
 def test_dbfs_style_volume_path_is_accepted():
     assert normalize_volume("dbfs:/Volumes/main/default/s") == "/Volumes/main/default/s"
 
@@ -156,3 +169,78 @@ def test_every_mode_maps_to_a_backend():
     assert DEFAULT_MODE in _BY_MODE
     for mode, backend in _BY_MODE.items():
         assert callable(backend), mode
+
+
+# ----------------------------------------------------------------------
+# job output written to a table
+# ----------------------------------------------------------------------
+class _TableClient:
+    def api(self, method, path, body=None, query=None):
+        return {
+            "table_id": "tbl-1",
+            "storage_location": "s3://lake/daily",
+            "data_source_format": "DELTA",
+        }
+
+
+class _MarkerStorage:
+    def __init__(self, text):
+        self.text = text
+
+    def read_text(self, path, max_bytes=None):
+        return self.text
+
+
+def _jobs_backend(marker):
+    backend = object.__new__(DatabricksJobsBackend)
+    backend.client = _TableClient()
+    backend.storage = _MarkerStorage(marker)
+    return backend
+
+
+def _table_handle():
+    return JobHandle(
+        backend="databricks",
+        job_id="1",
+        extra={"output_table": "main.retail.daily", "result_path": "/Volumes/x/r.json"},
+    )
+
+
+def test_table_output_is_pinned_to_the_version_the_job_wrote():
+    backend = _jobs_backend('{"ok": true, "wrote": "table", "version": 7}')
+    ref = backend.read_output(_table_handle(), "table")
+    assert isinstance(ref, UnityCatalogTable)
+    assert ref.full_name == "main.retail.daily"
+    assert ref.version == 7
+
+
+def test_url_output_is_still_the_table_name():
+    backend = _jobs_backend('{"ok": true, "version": 7}')
+    assert backend.read_output(_table_handle(), "url") == "main.retail.daily"
+
+
+def test_driver_reports_the_version_it_wrote():
+    class Writer:
+        def mode(self, mode):
+            return self
+
+        def saveAsTable(self, name):
+            self.saved = name
+
+    class Frame:
+        write = Writer()
+
+    class Session:
+        def sql(self, statement):
+            assert statement == "DESCRIBE HISTORY main.retail.daily LIMIT 1"
+
+            class Rows:
+                def collect(self):
+                    return [{"version": 3}]
+
+            return Rows()
+
+    result = remote_driver._write_output(
+        Frame(), None, "main.retail.daily", "overwrite", None, spark=Session()
+    )
+    assert result == {"wrote": "table", "table": "main.retail.daily", "version": 3}

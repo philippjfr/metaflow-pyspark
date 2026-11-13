@@ -1,7 +1,8 @@
-"""Demo 6b: turn the tags into a cost breakdown.
+"""Chapter 7b: turn the tags into a cost breakdown.
 
     python query_costs.py --warehouse-id abc123
     python query_costs.py --run-id 1724500000000000 --group-by step
+    python query_costs.py --source query-history --group-by step
 
 Groups the Databricks system billing tables by the tags the submitted jobs carried, through
 a SQL warehouse. This is a parameterized version of `plugins/cost.DATABRICKS_USAGE_QUERY`,
@@ -9,9 +10,14 @@ which is the copy-paste form for a workspace SQL editor; `--print-query` prints 
 you would rather run it there. Nothing here is Metaflow-specific machinery: it is the
 customer's own billing data, grouped by tags they can also group by themselves.
 
-Requirements: `system.billing` enabled on the metastore, USE on the `system` catalog, and a
-SQL warehouse. Usage rows land within a few hours, so a run submitted a minute ago will not
-appear yet.
+`--source billing` (the default) covers submitted jobs, whose compute carries the tags as
+`custom_tags`. `--source query-history` covers `query()` statements, which run on a shared
+warehouse and carry the tags as `query_tags` instead, so the breakdown is in statements and
+warehouse time rather than DBUs.
+
+Requirements: `system.billing` (or `system.query`) enabled on the metastore, USE on the
+schema, and a SQL warehouse. Rows land within minutes to hours, so a run submitted a minute
+ago may not appear yet.
 """
 
 import argparse
@@ -47,20 +53,36 @@ ORDER BY est_cost_usd DESC
 LIMIT {limit}
 """
 
-COLUMNS = {
-    "flow": "u.custom_tags['metaflow_flow']   AS flow",
-    "run_id": "u.custom_tags['metaflow_run_id'] AS run_id",
-    "step": "u.custom_tags['metaflow_step']   AS step",
-    "user": "u.custom_tags['metaflow_user']   AS user",
+# Warehouse statements share compute, so there is no per-statement DBU figure to sum;
+# statement count and execution time are what is attributable.
+HISTORY_QUERY = """
+SELECT
+    {group_columns},
+    COUNT(*) AS statements,
+    ROUND(SUM(q.total_duration_ms) / 1000.0, 1) AS seconds
+FROM system.query.history q
+WHERE q.query_tags['metaflow_flow'] IS NOT NULL
+  AND q.start_time >= DATEADD(day, -{days}, CURRENT_DATE())
+  {run_filter}
+GROUP BY ALL
+ORDER BY seconds DESC
+LIMIT {limit}
+"""
+
+SOURCES = {
+    "billing": (QUERY, "u.custom_tags"),
+    "query-history": (HISTORY_QUERY, "q.query_tags"),
 }
 
 
-def build_query(group_by, days, run_id, limit):
-    columns = ",\n    ".join(COLUMNS[name] for name in GROUPINGS[group_by])
-    run_filter = (
-        "AND u.custom_tags['metaflow_run_id'] = '%s'" % run_id if run_id else ""
+def build_query(group_by, days, run_id, limit, source="billing"):
+    template, tags = SOURCES[source]
+    columns = ",\n    ".join(
+        "%s['metaflow_%s'] AS %s" % (tags, name, name) for name in GROUPINGS[group_by]
     )
-    return QUERY.format(
+    # run_id is validated as digits by the CLI, so formatting it in is safe.
+    run_filter = "AND %s['metaflow_run_id'] = '%s'" % (tags, run_id) if run_id else ""
+    return template.format(
         group_columns=columns, days=days, run_filter=run_filter, limit=limit
     )
 
@@ -78,9 +100,7 @@ def execute(client, warehouse_id, statement):
     )
     while response.get("status", {}).get("state") in ("PENDING", "RUNNING"):
         time.sleep(2)
-        response = client.api(
-            "GET", "%s/%s" % (STATEMENTS, response["statement_id"])
-        )
+        response = client.api("GET", "%s/%s" % (STATEMENTS, response["statement_id"]))
 
     state = response.get("status", {}).get("state")
     if state != "SUCCEEDED":
@@ -97,8 +117,9 @@ def print_table(response):
     rows = response.get("result", {}).get("data_array") or []
     if not rows:
         print(
-            "No tagged usage found. Billing rows take a few hours to appear, and only "
-            "jobs submitted with mode='job' carry custom_tags."
+            "Nothing tagged found. System table rows take a while to appear; billing "
+            "rows only exist for jobs submitted with mode='job', and query history rows "
+            "only for query() statements."
         )
         return
 
@@ -118,6 +139,12 @@ def print_table(response):
         )
 
 
+def _run_id(value):
+    if not value.isdigit():
+        raise argparse.ArgumentTypeError("a Metaflow run id is all digits")
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -125,10 +152,14 @@ def main():
         default=os.environ.get("DATABRICKS_WAREHOUSE_ID"),
         help="SQL warehouse to run the query on (or set DATABRICKS_WAREHOUSE_ID)",
     )
-    parser.add_argument("--run-id", help="restrict to one Metaflow run")
+    parser.add_argument("--run-id", type=_run_id, help="restrict to one Metaflow run")
     parser.add_argument(
-        "--group-by", choices=sorted(GROUPINGS), default="step"
+        "--source",
+        choices=sorted(SOURCES),
+        default="billing",
+        help="billing for submitted jobs, query-history for query() statements",
     )
+    parser.add_argument("--group-by", choices=sorted(GROUPINGS), default="step")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument(
@@ -136,7 +167,9 @@ def main():
     )
     args = parser.parse_args()
 
-    statement = build_query(args.group_by, args.days, args.run_id, args.limit)
+    statement = build_query(
+        args.group_by, args.days, args.run_id, args.limit, source=args.source
+    )
     if args.print_query:
         print(statement)
         return

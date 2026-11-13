@@ -105,7 +105,17 @@ def _import_job(module_name, package_dir):
         )
 
 
-def _write_output(df, output_path, output_table, write_mode, partition_by):
+def _table_version(spark, table):
+    # The submitting side pins the reference to this version. Reading it here, on the
+    # session that just wrote, needs no credential vending on the submitting side.
+    try:
+        return spark.sql("DESCRIBE HISTORY %s LIMIT 1" % table).collect()[0]["version"]
+    except Exception as exc:
+        _log("could not read the Delta version of %s: %s" % (table, exc))
+        return None
+
+
+def _write_output(df, output_path, output_table, write_mode, partition_by, spark=None):
     if df is None:
         _log("job returned no DataFrame; nothing written")
         return {"wrote": None}
@@ -116,8 +126,9 @@ def _write_output(df, output_path, output_table, write_mode, partition_by):
 
     if output_table:
         writer.saveAsTable(output_table)
-        _log("wrote result to table %s" % output_table)
-        return {"wrote": "table", "table": output_table}
+        version = _table_version(spark, output_table) if spark is not None else None
+        _log("wrote result to table %s (version %s)" % (output_table, version))
+        return {"wrote": "table", "table": output_table, "version": version}
 
     writer.parquet(output_path)
     _log("wrote result to %s" % output_path)
@@ -162,7 +173,9 @@ def start_job(
         )
 
     df = func(spark, **inputs)
-    return _write_output(df, output_path, output_table, write_mode, partition_by)
+    return _write_output(
+        df, output_path, output_table, write_mode, partition_by, spark=spark
+    )
 
 
 def _publish_result(result_path, result):

@@ -1,4 +1,4 @@
-"""Demo 1b: when Connect is not enough.
+"""Chapter 1b: when Connect is not enough.
 
 Spark Connect gives you a session against Databricks Spark, but the driver runs in the
 Metaflow task. If you need a pinned Databricks Runtime, Photon, cluster-scoped libraries,

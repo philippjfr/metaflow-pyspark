@@ -141,6 +141,27 @@ def test_pycache_is_excluded(tmp_path, monkeypatch):
     assert not any("__pycache__" in n for n in names)
 
 
+def test_a_symlinked_job_module_ships_as_a_file(tmp_path, monkeypatch):
+    import io
+    import sys
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "linkedjob.py").write_text("def run(spark):\n    return None\n")
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    (demo / "linkedjob.py").symlink_to(shared / "linkedjob.py")
+    monkeypatch.syspath_prepend(str(demo))
+    sys.modules.pop("linkedjob", None)
+    import linkedjob
+
+    package = build_package(linkedjob.run)
+    with tarfile.open(fileobj=io.BytesIO(package.blob), mode="r:gz") as tar:
+        member = tar.getmember("linkedjob.py")
+        assert member.isfile()
+        assert b"def run" in tar.extractfile(member).read()
+
+
 def test_a_lambda_cannot_be_packaged():
     with pytest.raises(SparkConfigError):
         resolve_job_module(eval("lambda spark: None", {"__builtins__": {}}))

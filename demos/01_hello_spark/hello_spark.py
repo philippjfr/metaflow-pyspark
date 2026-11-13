@@ -1,4 +1,4 @@
-"""Demo 1: the same flow, three places to run it.
+"""Chapter 1: the same flow, three places to run it.
 
     # local Spark, no account, no credentials
     python hello_spark.py run
@@ -14,7 +14,8 @@
 
 The step body does not change between them, so "is this real Spark or a lookalike" has an
 answer you can run rather than argue about. Every one of those environment variables can
-instead be a decorator attribute or a key in a config artifact; see demo 2.
+instead be a decorator attribute or a key in a config artifact; `photon_job.py` shows
+the decorator form.
 """
 
 from _env import spark_backend_kind, step_env

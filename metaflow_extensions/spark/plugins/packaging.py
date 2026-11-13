@@ -146,7 +146,9 @@ def build_package(job_func, include=None, extra_modules=None):
 
     buf = io.BytesIO()
     seen = set()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    # Dereference so a module symlinked in from a shared location ships as a file, not
+    # as a link that dangles on the cluster.
+    with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
         for source, arcname in entries:
             if arcname in seen:
                 continue

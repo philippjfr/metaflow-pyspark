@@ -60,6 +60,10 @@ def _delta_protocol_error_types():
         return ()
 
 
+def _sql_literal(value):
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _azure_storage_account(storage_location):
     """Pull the storage account name out of an ADLS Gen2 storage location.
 
@@ -122,7 +126,12 @@ class UnityCatalogTable:
     # ------------------------------------------------------------------
     def __getstate__(self):
         state = self.__dict__.copy()
-        for key in ("_client", "_credentials", "_credentials_expiry"):
+        for key in (
+            "_client",
+            "_credentials",
+            "_credentials_expiry",
+            "_credentials_operation",
+        ):
             state.pop(key, None)
         return state
 
@@ -224,7 +233,11 @@ class UnityCatalogTable:
         for that table's storage only.
         """
         now = time.time()
-        if self._credentials and now < self._credentials_expiry:
+        if (
+            self._credentials
+            and now < self._credentials_expiry
+            and getattr(self, "_credentials_operation", "READ") == operation
+        ):
             return self._credentials
 
         if not self.table_id:
@@ -255,6 +268,7 @@ class UnityCatalogTable:
         else:
             self._credentials_expiry = now + 300
         self._credentials = response
+        self._credentials_operation = operation
         return response
 
     def storage_options(self, operation="READ"):
@@ -331,7 +345,7 @@ class UnityCatalogTable:
         if not self.storage_location:
             raise UnityCatalogError(
                 "%s has no storage location, so it cannot be read without Spark. "
-                "Managed views and foreign tables have to go through to_spark()."
+                "Views and foreign tables have to go through to_spark() or query()."
                 % self.full_name
             )
         kwargs = {"storage_options": self.storage_options()}
@@ -348,7 +362,9 @@ class UnityCatalogTable:
             dataset = delta.to_pyarrow_dataset()
             table = dataset.to_table(columns=columns, filter=filters)
         except _delta_protocol_error_types() as exc:
-            table = self._read_via_duckdb(exc)
+            # The log is readable even when the data is not, so the version resolves
+            # here, timestamp pins included.
+            table = self._read_via_duckdb(exc, version=delta.version())
             if columns:
                 table = table.select(columns)
             if filters is not None:
@@ -383,7 +399,7 @@ class UnityCatalogTable:
             message += "\n(DuckDB fallback not used: %s)" % duckdb_reason
         return UnityCatalogError(message)
 
-    def _read_via_duckdb(self, original_exc):
+    def _read_via_duckdb(self, original_exc, version=None):
         """Fall back to DuckDB's own Delta reader for a table delta-rs cannot read.
 
         This is a genuinely different implementation from `deltalake`'s Python
@@ -463,9 +479,17 @@ class UnityCatalogTable:
                 # the connection closes in `finally` below, and a lazy
                 # RecordBatchReader consumed after that point silently reads as
                 # empty rather than raising, which is a worse bug than a slower one.
-                return con.sql(
-                    "SELECT * FROM delta_scan(?)", params=[self.storage_location]
-                ).fetch_arrow_table()
+                if version is None:
+                    return con.sql(
+                        "SELECT * FROM delta_scan(?)", params=[self.storage_location]
+                    ).fetch_arrow_table()
+                # delta_scan has no version parameter; ATTACH does, and takes no
+                # parameter markers, hence the quoted literal.
+                con.execute(
+                    "ATTACH '%s' AS uc_snapshot (TYPE delta, VERSION %d)"
+                    % (self.storage_location.replace("'", "''"), int(version))
+                )
+                return con.sql("SELECT * FROM uc_snapshot").fetch_arrow_table()
             except Exception as exc:
                 raise self._translate_protocol_error(
                     original_exc, "DuckDB's own reader also failed: %s" % exc
@@ -589,6 +613,74 @@ class UnityCatalogTable:
             "metaflow_flow": ctx.flow_name,
             "metaflow_run_id": ctx.run_id,
         }
+
+    @property
+    def quoted_name(self):
+        return ".".join(
+            "`%s`" % part.replace("`", "``")
+            for part in (self.catalog, self.schema, self.table)
+        )
+
+    def stamp_lineage(self, ctx, warehouse_id=None):
+        """Set `lineage_tags(ctx)` as Unity Catalog tags on this table.
+
+        UC records which query wrote a table but not which Metaflow task ran it; these
+        tags point back from the table to the task. Runs through `query()`, so inside a
+        `@spark` step it reuses the live session and elsewhere it needs a warehouse.
+        """
+        from ..warehouse import query
+
+        tags = self.lineage_tags(ctx)
+        # DDL takes no parameter markers, so the values are escaped literals.
+        assignments = ", ".join(
+            "'%s' = '%s'" % (key, _sql_literal(value)) for key, value in tags.items()
+        )
+        query(
+            "ALTER TABLE %s SET TAGS (%s)" % (self.quoted_name, assignments),
+            warehouse_id=warehouse_id,
+            output_format="none",
+        )
+        return tags
+
+    # ------------------------------------------------------------------
+    # writes
+    # ------------------------------------------------------------------
+    def write(self, data, mode="append"):
+        """Write `data` straight to the table's Delta files, with no cluster involved.
+
+        Unity Catalog vends READ_WRITE credentials for the table, and `deltalake`
+        commits the write. Returns a new reference pinned to the version just written.
+        Only external tables: writes to a managed table's storage must go through
+        Databricks so that UC stays the table's single committer.
+
+        Engine-side guarantees do not apply here. UC records no lineage edge for the
+        write, and constraints, generated columns, or row filters on the table are not
+        evaluated, which is why this needs `EXTERNAL USE SCHEMA` and `MODIFY`.
+        """
+        if self.table_type == "MANAGED":
+            raise UnityCatalogError(
+                "%s is a managed table, so it cannot be written through credential "
+                "vending: Databricks has to commit writes to managed tables. Write it "
+                "with Spark (saveAsTable), a job's output_table, or an INSERT through "
+                "query(), or write to an external table instead." % self.full_name
+            )
+        try:
+            from deltalake import write_deltalake
+        except ImportError:
+            raise SparkBackendUnavailable(
+                "unity-catalog credential vending", "deltalake", extra="catalog"
+            )
+        if not self.storage_location:
+            raise UnityCatalogError(
+                "%s has no storage location to write to." % self.full_name
+            )
+        write_deltalake(
+            self.storage_location,
+            data,
+            mode=mode,
+            storage_options=self.storage_options(operation="READ_WRITE"),
+        )
+        return self.latest()
 
 
 def read_table(name, version=None, columns=None, spark=None, config=None):

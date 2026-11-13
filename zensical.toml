@@ -22,9 +22,12 @@ nav = [
   ]},
   {"Tutorials" = [
     {"Gallery" = "tutorials/index.md"},
+    {"The Shared Table" = "tutorials/seed.md"},
     {"Hello Spark: One Flow, Three Backends" = "tutorials/hello-spark.md"},
-    {"Unity Catalog Governance" = "tutorials/unity-catalog-governance.md"},
-    {"Reading Without a Cluster" = "tutorials/no-cluster.md"},
+    {"Reading: One Statement, Four Engines" = "tutorials/reading.md"},
+    {"Results: Copy or Reference" = "tutorials/results.md"},
+    {"Writing: One Summary, Four Writers" = "tutorials/writing.md"},
+    {"Governance and Reproducibility" = "tutorials/reproducibility.md"},
     {"Orchestrating Existing Jobs" = "tutorials/existing-jobs.md"},
     {"Cost Attribution" = "tutorials/cost-attribution.md"}
   ]},

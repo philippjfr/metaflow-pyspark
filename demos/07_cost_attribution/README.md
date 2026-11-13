@@ -1,4 +1,4 @@
-# Demo 6: "why did this month cost more?"
+# Chapter 7: "why did this month cost more?"
 
 Databricks bills compute. It has no way to know that a given cluster-hour belonged to the feature
 step of the churn flow, run by a specific person, on a specific attempt. That mapping is exactly what
@@ -25,11 +25,7 @@ python tagged_runs.py run
 python query_costs.py --run-id <run_id> --group-by step
 ```
 
-`tagged_runs.py` runs the same shuffle-heavy workload three ways, on serverless, on an instance pool,
-and on a fresh job cluster, plus a fourth branch that reads governed data with no Databricks compute
-at all. Then it reads each run's `setup_duration` back from the Jobs API and prints the cold-start
-comparison. Cluster versus pool versus serverless, measured on your workspace rather than asserted
-from a slide.
+`tagged_runs.py` submits chapter 2's daily aggregate three ways, on serverless, on an instance pool, and on a fresh job cluster, then reads each run's `setup_duration` back from the Jobs API and prints the cold-start comparison. The aggregate is small on purpose, so what the table shows is what each compute shape costs before any code runs, measured on your workspace rather than asserted from a slide. Credential vending has no row because it starts no compute; chapter 2 timed it against these engines.
 
 Billing rows take a few hours to appear, so `query_costs.py` on a run from a minute ago will come up
 empty. That is the usage pipeline's latency, not a bug in the tags. To see the shape of the output
@@ -42,7 +38,10 @@ Useful groupings:
 python query_costs.py --group-by flow           # which flows cost the most
 python query_costs.py --group-by step --days 7  # which step inside them
 python query_costs.py --group-by user           # who is spending
+python query_costs.py --source query-history    # query() statements on warehouses
 ```
+
+`--source query-history` groups `system.query.history` by the `query_tags` every `query()` statement carries, which covers the warehouse reads and writes in chapters 0, 2, 4, and 5. A warehouse is shared compute, so the breakdown is in statements and warehouse seconds rather than DBUs. It needs `system.query` enabled and `USE SCHEMA` on it.
 
 ## Requirements
 

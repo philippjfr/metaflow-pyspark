@@ -46,6 +46,17 @@ _FAILURE_EXPLANATIONS = {
     "SUCCESS_WITH_FAILURES": "some tasks failed",
 }
 
+
+def task_python_file(path):
+    """`path` in the form `spark_python_task.python_file` resolves.
+
+    Without a scheme the Jobs API looks the path up as a workspace file, so a bare
+    `/Volumes/...` path fails with "Cannot read the python file" even though the file
+    is there; the `dbfs:` scheme makes it read the Volume.
+    """
+    return "dbfs:" + path if is_volume_path(path) else path
+
+
 _RUNNING_STATES = {
     "PENDING",
     "QUEUED",
@@ -292,7 +303,7 @@ class DatabricksJobsBackend(_DatabricksRunBackend):
         task = {
             "task_key": "main",
             "spark_python_task": {
-                "python_file": driver_path,
+                "python_file": task_python_file(driver_path),
                 "parameters": [json.dumps(driver_conf)],
             },
         }
@@ -359,13 +370,17 @@ class DatabricksJobsBackend(_DatabricksRunBackend):
 
         table = handle.extra.get("output_table")
         if table:
-            if output_format in ("url", "table"):
+            if output_format == "url":
                 return table
             from ...catalog.unity import UnityCatalogTable
 
-            return UnityCatalogTable(table, client=self.client).materialize(
-                output_format
+            # Pin to the version this job wrote, not whatever the table holds by the
+            # time the next step reads it.
+            version = self._written_version(handle)
+            ref = UnityCatalogTable(
+                table, version=version, client=self.client, pin=version is None
             )
+            return ref.materialize(output_format)
 
         path = handle.extra.get("output_path")
         if output_format in ("url", "table"):
@@ -386,6 +401,16 @@ class DatabricksJobsBackend(_DatabricksRunBackend):
                 table = read_parquet(tmp)
             return _convert(table, output_format)
         raise SparkConfigError("Do not know how to read the output at %r." % path)
+
+    def _written_version(self, handle):
+        marker = handle.extra.get("result_path")
+        text = self.storage.read_text(marker) if marker else None
+        if not text:
+            return None
+        try:
+            return json.loads(text).get("version")
+        except ValueError:
+            return None
 
     def cleanup(self, handle, ctx):
         staging = handle.extra.get("staging")

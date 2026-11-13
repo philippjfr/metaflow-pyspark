@@ -70,34 +70,37 @@ history = self.orders.history(limit=20)
 
 ## Writing, and lineage
 
-Register a step's output back as a UC table, and stamp it with the Metaflow pathspec so
-the customer's own lineage graph shows which flow produced it:
+Four ways to write a governed table, each ending in a pinned reference:
 
 ```python
-df.write.mode("append").saveAsTable("main.retail.daily_summary")
+# Spark, in a session step
+df.write.mode("overwrite").saveAsTable("main.retail.daily_summary")
+self.daily = UnityCatalogTable("main.retail.daily_summary")
 
-from metaflow_extensions.spark.plugins.catalog.unity import UnityCatalogTable
+# a submitted job: the artifact comes back pinned to the version the job wrote
+@spark(backend="databricks", mode="job", job=summarize,
+       output_table="main.retail.daily_summary", output_format="table",
+       output_artifact="daily")
 
-table = UnityCatalogTable("main.retail.daily_summary")
-tags = table.lineage_tags(ctx=current)   # metaflow_pathspec, metaflow_flow, metaflow_run_id
+# a warehouse statement
+query("CREATE OR REPLACE TABLE main.retail.daily_summary AS SELECT ...",
+      output_format="none")
+self.daily = UnityCatalogTable("main.retail.daily_summary")
+
+# credential vending, external tables only
+self.daily = UnityCatalogTable("main.ext.daily_summary").write(arrow_table, mode="append")
 ```
 
-Open the table in the workspace and look at its tags panel to see the exact task that
-produced it, or paste the pathspec into `Task("...")` from a notebook to get back to the
-run.
+`write()` commits with `deltalake` through vended `READ_WRITE` credentials, so it needs `MODIFY` and `EXTERNAL USE SCHEMA`, and refuses a managed table, whose writes Databricks has to commit. The engine never sees a vended write, so Unity Catalog records no lineage for it and does not evaluate constraints or generated columns.
 
-## Rule of thumb: Spark vs. vending
+Then stamp the table with the task that wrote it:
 
-| | Databricks Connect / Spark | Credential vending |
-| --- | --- | --- |
-| Where the read runs | Databricks compute | the Metaflow task |
-| DBUs | yes | none |
-| Cold start | seconds to minutes | none |
-| Joins across large tables | yes | not usefully |
-| Views, row filters, column masks | yes, engine-enforced | no — fails or falls back |
-| Extra grant needed | `SELECT` | `SELECT` plus `EXTERNAL USE SCHEMA` |
+```python
+self.daily.stamp_lineage(current)   # metaflow_pathspec, metaflow_flow, metaflow_run_id
+```
 
-Vending wins clearly when the read fits comfortably in the task's memory — roughly
-single-digit gigabytes — and the work afterward is single-node anyway. Spark wins when
-the input is large, the work is a shuffle or a join, or the table is a view or has
-row-level security, since those are enforced by the engine and vending cannot see them.
+`stamp_lineage` runs `ALTER TABLE ... SET TAGS` through `query()`, so inside a `@spark` step it reuses the session and elsewhere it needs a warehouse. Open the table in the workspace and look at its tags panel to see the exact task that produced it, or paste the pathspec into `Task("...")` from a notebook to get back to the run.
+
+## Choosing a path
+
+Spark, credential vending, and a SQL warehouse compared on the same table, for reads and writes, is the subject of the [reading](../tutorials/reading.md) and [writing](../tutorials/writing.md) tutorials, including a four-way comparison table. In short: vending wins when the read fits comfortably in the task's memory, roughly single-digit gigabytes, and the work afterward is single-node anyway. A warehouse wins when a view, row filter, or column mask is involved. Spark wins when the input is large or the work is a shuffle or a join.

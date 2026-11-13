@@ -4,25 +4,21 @@ This is what the ported Databricks job looks like once it is a function: it take
 and its parameters, returns a DataFrame, and knows nothing about Metaflow. It runs
 unchanged under `@spark`, under `pytest` with a local session, and in a notebook.
 
-Column names below match `samples.bakehouse.sales_transactions`, the default table for
-`ported_step.py`. Point `orders_table_name` at your own orders table instead and adjust the
-column names accordingly.
+Columns match `main.retail.orders` as chapter 0 seeds it.
 """
 
 from pyspark.sql import functions as F
 
 
 def enrich_customers(spark, run_date, orders_table_name):
-    orders = spark.read.table(orders_table_name).where(
-        F.to_date("dateTime") <= run_date
-    )
+    orders = spark.read.table(orders_table_name).where(F.col("order_date") <= run_date)
 
     return (
-        orders.groupBy("customerID")
+        orders.groupBy("customer_id")
         .agg(
-            F.count("transactionID").alias("orders"),
-            F.sum("totalPrice").alias("lifetime_value"),
-            F.max(F.to_date("dateTime")).alias("last_order_date"),
+            F.count("order_id").alias("orders"),
+            F.sum("amount").alias("lifetime_value"),
+            F.max("order_date").alias("last_order_date"),
         )
         .withColumn(
             "segment",

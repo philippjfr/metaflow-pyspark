@@ -17,7 +17,7 @@ def crunch(self):
 | `"arrow"` | a `pyarrow.Table` |
 | `"polars"` | a `polars.DataFrame` |
 | `"spark"` | the live Spark `DataFrame` itself — not picklable, only useful within the same step |
-| `"table"` | a reference to the output table, not a copy |
+| `"table"` | with `output_table=...`, a `UnityCatalogTable` pinned to the version the job wrote |
 | `"url"` | a storage URL pointing at the written output, not a copy |
 | `"none"` | nothing; use this when the step only has side effects |
 
